@@ -80,6 +80,54 @@ defines the plugin preparation exchange. The [native plugin integration](plugins
 connects the callback to task execution. A Launcher implementation remains the
 execution owner's responsibility.
 
+### Bounded retained task admission
+
+Core sends `lease.metadata.runnerTaskAdmissionSupported: 1` as a transient host
+capability. A plugin can return `admissionSnapshotVersion: 1` in a description
+only when this flag is present and the plugin supports the admission contract.
+An older host receives the original description shape. An older plugin ignores
+the flag and keeps its existing preparation path.
+
+For a proven retained Codex or Claude task, Core can reserve one admission with
+a 30-second deadline. The deadline starts before the reservation queries. It
+covers task preparation, project authentication, provider attachment, and the
+authenticated Runner connection. It is not restarted by each RPC. Fresh setup,
+probes, recovery, and other providers keep their existing budgets.
+
+The reservation uses the existing native run coordinator. Short transactions
+record its owner, expiry, and completion. The transaction acquires coordinator
+and run locks before non-waiting agent and plugin locks. A separate read captures
+fresh policy and runtime revision after those locks. Core does not hold a
+transaction across plugin or provider network calls. This also supports a
+transaction-pooled runtime database connection.
+
+An accepted admission retains its ready lifecycle version, runtime revision,
+agent status, and selected computer binding for this interval. Core-managed
+agent configuration and Launcher-binding mutations wait for the reservation.
+A Pause records its intent immediately and blocks new admissions. An admitted
+startup can finish or fail before the existing cancellation and lifecycle
+cleanup continue. A direct run Stop remains a cancellation operation.
+
+The plugin receives an opaque admission ID and its fixed deadline in transient
+lease metadata. Core binds the actual permit to the worker invocation. An ID
+copied from another request, persisted metadata, or a previous Core process
+does not grant admission. The snapshot remains private to the attempt and ends
+on completion, failure, or expiry. The plugin must stop new requests at expiry
+and combine the deadline with each outbound request timeout.
+
+Expiry does not prove that the provider or a pending resource transaction has
+stopped. Lifecycle changes still require the existing Stop and termination
+confirmation before changing the VM or its binding. An already accepted
+resource transaction can finish after its client disconnects. Operator plugin
+restart, upgrade, uninstall, and out-of-band VM administration remain explicit
+interruptions.
+
+`run.attach` can initialize a provider process before task inference starts.
+Core publishes the session and checks current run cancellation before it sends
+`turn.start`. A late startup handle is cancelled when Stop or the admission
+deadline has already won. Starting a provider process alone is not evidence of
+a model request or token usage.
+
 ## Managed Git helper interpreter
 
 `githubLauncherSource({ interpreterPath })` can select an absolute Node interpreter

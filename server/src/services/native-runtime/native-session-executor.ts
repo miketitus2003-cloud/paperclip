@@ -28,6 +28,8 @@ import { resolvePluginTaskResume } from "../environment-task-runtime.js";
 import { environmentTaskResultSchema } from "@paperclipai/plugin-sdk";
 import { preparePluginRunnerCredentials } from "./plugin-runner-credentials.js";
 import { createPluginRunnerTaskOwner, verifyPluginRunnerTaskReattachment } from "./plugin-runner-task.js";
+import { assertNativeTaskAdmissionCurrent, beginNativeTaskAdmission, finishNativeTaskAdmission, type NativeTaskAdmission } from "./native-task-admission.js";
+import { logger } from "../../middleware/logger.js";
 import { applyObservabilityEnvironment, type ProviderObservabilityLaunch } from "@paperclipai/adapter-utils/agent-observability";
 import { museRunnerBroker } from "../muse-runner-broker.js";
 import { nativeCaseHandoffResult } from "./native-case-handoff.js";
@@ -297,6 +299,7 @@ type NativeSessionStartup = {
   governedWait?: boolean;
   priorRestartDetach?: symbol;
   leaseOwner?: string;
+  admission?: NativeTaskAdmission;
   executionLeaseRenewal?: NativeExecutionLeaseRenewal;
   settled: Promise<void>;
   settle: () => void;
@@ -8048,6 +8051,12 @@ export async function executePaperclipNativeSession(input: {
     }
     throw error;
   } finally {
+    if (startup.admission) {
+      await finishNativeTaskAdmission(input.db, startup.admission).catch(error => {
+        logger.warn({ err: error, runId }, "Failed to release native task admission");
+      });
+      startup.admission = undefined;
+    }
     if (executingNativeOwnerScopes.get(ownerScope) === ownerToken) {
       executingNativeOwnerScopes.delete(ownerScope);
     }
@@ -9529,6 +9538,7 @@ async function executePaperclipNativeSessionWithinScope(
                 const active: ActiveNativeSession = { session, cancelRequested: false };
                 activeNativeSessions.set(input.execution.binding.runId, active);
                 const startup = nativeSessionStartups.get(input.execution.binding.runId);
+                const admissionDeadlineAtMs = startup?.admission?.expiresAtMs;
                 startup?.resolve(active);
                 if (startup?.stopRequested) {
                   // Publication wakes the Stop caller; wait for its durable ACK
@@ -9539,6 +9549,11 @@ async function executePaperclipNativeSessionWithinScope(
                   // must still be cancelled instead of escaping the Stop fence.
                   await cancelNativeSession(input.execution.binding.runId, "Stop requested during native startup");
                   throw new Error("native_finalization_missing: session returned no semantic result");
+                }
+                if (startup?.admission) {
+                  await assertNativeTaskAdmissionCurrent(input.db, startup.admission);
+                  await finishNativeTaskAdmission(input.db, startup.admission);
+                  startup.admission = undefined;
                 }
                 // Stop can win after the coordinator claim while the provider
                 // session is still opening. Publishing the handle before this
@@ -9577,6 +9592,9 @@ async function executePaperclipNativeSessionWithinScope(
                 if (active.cancelRequested) {
                   await active.cancellationSettled;
                   throw new NativeCancellationPendingRecoveryError();
+                }
+                if (admissionDeadlineAtMs !== undefined && admissionDeadlineAtMs <= Date.now()) {
+                  throw new Error("native_task_admission_expired");
                 }
               } else {
                 liveQuestions.close();
@@ -12139,6 +12157,20 @@ async function createRunnerdBackendWithinSessionClaim(
       }, onDispatched: input.onTaskDispatched,
     };
     if (input.execution.session.lifecyclePolicy.mode === "warm" && (!credentials.accountIdentity || description.warmTaskVersion !== 1)) throw new Error("Plugin warm task capability or account unavailable");
+    if (retainedOwner && !adopting && description.admissionSnapshotVersion === 1 &&
+        (provider.kind === "codex" || provider.kind === "acpx" && provider.agent === "claude")) {
+      const startup = nativeSessionStartups.get(input.execution.binding.runId);
+      if (!startup?.leaseOwner || !remoteTarget.leaseId) throw new Error("native_task_admission_owner_missing");
+      const admission = await beginNativeTaskAdmission(input.db, {
+        companyId: input.execution.binding.companyId, agentId: input.execution.binding.agentId,
+        runId: input.execution.binding.runId, leaseId: remoteTarget.leaseId, leaseOwner: startup.leaseOwner,
+      }).catch(error => {
+        if (error instanceof Error && error.message === "native_task_admission_cancelled") throw new NativeCancellationPendingRecoveryError();
+        throw error;
+      });
+      startup.admission = admission;
+      ownerInput.admission = admission;
+    }
     const owner = retainedOwner ?? createPluginRunnerTaskOwner(ownerInput);
     if (retainedOwner) retainedOwner.rebind(ownerInput);
     if (description.workspaceFileReadVersion === 1) {

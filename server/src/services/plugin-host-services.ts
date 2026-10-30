@@ -3,6 +3,7 @@ import { createLiveEventDelivery } from "../realtime/live-event-delivery.js";
 import { createLiveRunEventRedactor } from "./live-run-event-redaction.js";
 import { projectInstanceSecretService } from "./project-instance-secrets.js";
 import { pluginAgentRuntimeState, pluginAgentRuntimeIdentity } from "./plugin-agent-runtime-state.js";
+import { currentNativeTaskAdmissionHostCall } from "./native-runtime/native-task-admission.js";
 import { createAgentLifecycle } from "./agent-lifecycle.js";
 import type { Db } from "@paperclipai/db";
 import {
@@ -3046,12 +3047,12 @@ export function buildHostServices(
       async getRuntimeIdentity(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return pluginAgentRuntimeIdentity(db, pluginId, companyId, params.agentId);
+        return pluginAgentRuntimeIdentity(db, pluginId, companyId, params.agentId, currentNativeTaskAdmissionHostCall());
       },
       async getRuntime(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return pluginAgentRuntimeState(db, pluginId, companyId, params.agentId, params.environmentId, params.installEnvironmentSkills);
+        return pluginAgentRuntimeState(db, pluginId, companyId, params.agentId, params.environmentId, params.installEnvironmentSkills, currentNativeTaskAdmissionHostCall());
       },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);

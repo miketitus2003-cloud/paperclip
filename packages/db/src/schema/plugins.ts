@@ -31,6 +31,7 @@ export const plugins = pgTable(
     categories: jsonb("categories").$type<PluginCategory[]>().notNull().default([]),
     manifestJson: jsonb("manifest_json").$type<PaperclipPluginManifestV1>().notNull(),
     status: text("status").$type<PluginStatus>().notNull().default("installed"),
+    runtimeMutations: jsonb("runtime_mutations").$type<Record<string, { owner: string; expiresAt: string }>>().notNull().default({}),
     installOrder: integer("install_order"),
     /** Resolved package path for local-path installs; used to find worker entrypoint. */
     packagePath: text("package_path"),

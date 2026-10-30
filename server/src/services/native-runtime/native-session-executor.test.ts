@@ -4,6 +4,7 @@ import * as runnerCheckpoint from "./native-runner-checkpoint.js";
 import { DurablePrpControlPlane } from "../../vendor/paperclip-runner/index.js";
 import * as environmentTaskRuntime from "../environment-task-runtime.js";
 import * as pluginTaskRuntime from "./plugin-runner-task.js";
+import * as nativeTaskAdmission from "./native-task-admission.js";
 import * as completionFeedback from "./native-completion-feedback.js";
 import { environmentTaskOperationSchema } from "@paperclipai/plugin-sdk";
 import { trace } from "@opentelemetry/api";
@@ -11683,9 +11684,9 @@ describe("runnerd provider runtime wiring", () => {
     await rm(isolatedStateDirectory, { recursive: true, force: true });
   });
 
-  it.each((["codex", "claude"] as const).flatMap(provider => (["unchanged", "external-checkpoint", "changed", "runtime-context", "retirement-failed", "stale-owner", "active-owner", "missing-owner", "foreign-environment", "plugin-replaced", "plugin-managed-github"] as const).filter(scenario => provider === "codex" || scenario.startsWith("plugin-")).map(scenario => [provider, scenario] as const)))("rotates an owned warm %s remote runner before checking changed configuration: %s", async (provider, scenario) => {
-    const plugin = scenario === "plugin-replaced" || scenario === "plugin-managed-github";
-    const reusable = ["unchanged", "external-checkpoint", "plugin-managed-github"].includes(scenario);
+  it.each((["codex", "claude"] as const).flatMap(provider => (["unchanged", "external-checkpoint", "changed", "runtime-context", "retirement-failed", "stale-owner", "active-owner", "missing-owner", "foreign-environment", "plugin-replaced", "plugin-managed-github", "plugin-admission", "plugin-admission-paused"] as const).filter(scenario => provider === "codex" || scenario.startsWith("plugin-")).map(scenario => [provider, scenario] as const)))("rotates an owned warm %s remote runner before checking changed configuration: %s", async (provider, scenario) => {
+    const plugin = scenario === "plugin-replaced" || scenario === "plugin-managed-github" || scenario.startsWith("plugin-admission");
+    const reusable = ["unchanged", "external-checkpoint", "plugin-managed-github", "plugin-admission", "plugin-admission-paused"].includes(scenario);
     const { permissionPolicy: _permissionPolicy, ...claudeProfile } = QUALIFIED_ACPX_PROFILES.claude;
     const first = { ...scopedNativeExecution(`warm-admission-${provider}-${scenario}`),
       schema: "paperclip.native-execution-input.v5" as const,
@@ -11694,7 +11695,7 @@ describe("runnerd provider runtime wiring", () => {
     if (provider === "claude") first.session.driverKind = "acpx_runtime";
     first.session.lifecyclePolicy = { mode: "warm", idleTimeoutMs: 60_000 };
     const next = { ...first, binding: { ...first.binding, runId: `${first.binding.runId}-next` },
-      session: { ...first.session, lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs: ["unchanged", "external-checkpoint", "runtime-context", "stale-owner", "missing-owner", "plugin-replaced", "plugin-managed-github"].includes(scenario) ? 60_000 : 90_000 } } };
+      session: { ...first.session, lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs: ["unchanged", "external-checkpoint", "runtime-context", "stale-owner", "missing-owner", "plugin-replaced", "plugin-managed-github", "plugin-admission", "plugin-admission-paused"].includes(scenario) ? 60_000 : 90_000 } } };
     if (scenario === "runtime-context") {
       next.runtimeContext = { ...first.runtimeContext,
         mcp: { ...first.runtimeContext.mcp, digest: "1".repeat(64) } };
@@ -11710,6 +11711,7 @@ describe("runnerd provider runtime wiring", () => {
     const task=vi.fn(async()=>{
       if(replacementPending) {acquisition.outcome="replacement";acquisition.providerLeaseId="task-next";replacementPending=false;}
       return {kind:"description",taskId:acquisition.providerLeaseId,launchPreparationVersion:1,projectAuthCheckVersion:1,warmTaskVersion:1,
+        ...(scenario.startsWith("plugin-admission") ? { admissionSnapshotVersion: 1 } : {}),
         runner:{version:"fixture",digest:`sha256:${"a".repeat(64)}`}};
     });
     const pluginTarget=plugin ? {...target,remoteCwd:".",leaseId:identity.environmentLeaseId,
@@ -11725,6 +11727,15 @@ describe("runnerd provider runtime wiring", () => {
     const owners=plugin ? vi.spyOn(pluginTaskRuntime,"createPluginRunnerTaskOwner") : undefined;
     const rebind = vi.fn();
     if (scenario === "plugin-managed-github") owners!.mockImplementation(input => ({...createOwner(input),rebind}));
+    const beginAdmission = scenario.startsWith("plugin-admission") ? vi.spyOn(nativeTaskAdmission, "beginNativeTaskAdmission")
+      .mockImplementation(async (_db, scope) => {
+        if (scenario === "plugin-admission-paused") throw new Error("native_task_admission_cancelled");
+        return { ...scope, id: "fixture-admission", environmentId, taskId: "task-first", pluginId: "fixture",
+          controllerGeneration: 1, expiresAtMs: Date.now() + 30_000, lifecycleVersion: 1, agentStatus: "running", runtimeRevision: "1" };
+      }) : undefined;
+    const assertAdmission = beginAdmission ? vi.spyOn(nativeTaskAdmission, "assertNativeTaskAdmissionCurrent").mockResolvedValue() : undefined;
+    const finishAdmission = beginAdmission ? vi.spyOn(nativeTaskAdmission, "finishNativeTaskAdmission").mockResolvedValue() : undefined;
+    if (beginAdmission) owners!.mockImplementation(input => ({ ...createOwner(input), rebind }));
 
     const root = await initializeScopedRunnerRoot(first, identity.runnerInstanceId);
     await writeRunnerAuthority(root, identity, "ready");
@@ -11817,7 +11828,12 @@ describe("runnerd provider runtime wiring", () => {
         runnerInstanceId: `runner-next-${scenario}`, useRunnerd: true,
         runnerExecutionTarget: (scenario === "foreign-environment" ? { ...target, environmentId: `${environmentId}-other` }
           : plugin ? {...pluginTarget,leaseId:"next-core-lease"} : target) as never,...pluginOptions });
-      if (["stale-owner", "active-owner", "missing-owner", "foreign-environment"].includes(scenario)) {
+      if (scenario === "plugin-admission-paused") {
+        await expect(continuation).rejects.toBeInstanceOf(NativeCancellationPendingRecoveryError);
+        expect(beginAdmission).toHaveBeenCalledOnce();
+        expect(state.execute).toHaveBeenCalledOnce();
+        expect(order).toEqual([]);
+      } else if (["stale-owner", "active-owner", "missing-owner", "foreign-environment"].includes(scenario)) {
         await expect(continuation).rejects.toThrow(scenario === "active-owner"
           ? "prior_owner_active" : "prior_owner_terminal_state_indeterminate");
         expect(state.execute).toHaveBeenCalledOnce();
@@ -11835,6 +11851,14 @@ describe("runnerd provider runtime wiring", () => {
           expect(owners!.mock.calls.at(-1)![0].adoptIdentity).toBeUndefined();
         }
         if (scenario === "plugin-managed-github") expect(rebind).toHaveBeenCalledOnce();
+        if (beginAdmission) {
+          expect(beginAdmission).toHaveBeenCalledOnce();
+          expect(beginAdmission).toHaveBeenCalledWith(nextDb, expect.objectContaining({ runId: next.binding.runId, leaseId: "next-core-lease" }));
+          const admission = await beginAdmission.mock.results[0]!.value;
+          expect(owners!.mock.results[0]!.value.rebind).toHaveBeenCalledWith(expect.objectContaining({ admission }));
+          expect(assertAdmission).toHaveBeenCalledWith(nextDb, admission);
+          expect(finishAdmission).toHaveBeenCalledOnce();
+        }
         expect(order).toEqual(reusable ? ["execute-next"] : ["retire", "execute-next"]);
         if (["unchanged", "external-checkpoint"].includes(scenario)) {
           if (!persistedController) await writeRunnerAuthority(root, { ...identity, runId: next.binding.runId }, "ready");
@@ -11866,6 +11890,7 @@ describe("runnerd provider runtime wiring", () => {
       await persistedController?.stop();
       failRetirement = false;
       resume?.mockRestore();owners?.mockRestore();feedback.mockRestore();
+      beginAdmission?.mockRestore();assertAdmission?.mockRestore();finishAdmission?.mockRestore();
       await closeWarmNativeSessionsForEnvironment({ environmentId, reason: "test cleanup" });
     }
   });

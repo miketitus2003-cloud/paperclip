@@ -135,6 +135,7 @@ export const environmentTaskResultSchema = z.discriminatedUnion("kind", [
     runner: z.object({ version: z.string().min(1), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/) }).strict(),
     warmTaskVersion: z.literal(1).optional(),
     launchPreparationVersion: z.literal(1).optional(),
+    admissionSnapshotVersion: z.literal(1).optional(),
     freshWorkspaceVersion: z.literal(1).optional(),
     projectAuthCheckVersion: z.literal(1).optional(),
     workspaceFileReadVersion: z.literal(1).optional(),

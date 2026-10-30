@@ -20,6 +20,7 @@ import { trackIdleWork } from "./task-admission.js";
 import { environmentService } from "./environments.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { pluginEnvironmentRequiresAgent } from "./plugin-environment-driver.js";
+import { assertAgentRuntimeMutation, withAgentRuntimeMutation } from "./native-runtime/agent-runtime-mutation.js";
 
 export { scheduleAgentLifecycle, processAgentLifecycle } from "../modules/agent-lifecycle/index.js";
 export type { LifecycleDriver, LifecycleAgent } from "../modules/agent-lifecycle/index.js";
@@ -50,6 +51,12 @@ export function createAgentLifecycleEffects(_hooks: BudgetServiceHooks = {}): li
       logger.warn({ ...context, failureCode: code ?? "unclassified" }, "Agent lifecycle operation failed");
     },
     transaction: withAccountingTransaction,
+    configurationTransaction: (db, companyId, work) => withAccountingTransaction(db, companyId, async (tx, publications) => {
+      await assertAgentRuntimeMutation(tx, companyId);
+      const result = await work(tx, publications);
+      await assertAgentRuntimeMutation(tx, companyId);
+      return result;
+    }),
     deleteDependencies: deleteAgentDependencies,
     policyBlocks,
     setAgentBudget: (db, publications, companyId, agentId, amount, userId, isActive) =>
@@ -69,7 +76,14 @@ export function createAgentLifecycleEffects(_hooks: BudgetServiceHooks = {}): li
 }
 
 export function createAgentLifecycle(db: Db, hooks: BudgetServiceHooks = {}) {
-  return lifecycle.createAgentLifecycle(db, createAgentLifecycleEffects(hooks));
+  const owner = lifecycle.createAgentLifecycle(db, createAgentLifecycleEffects(hooks));
+  return {
+    ...owner,
+    updateConfiguration: (...args: Parameters<typeof owner.updateConfiguration>) =>
+      withAgentRuntimeMutation(db, args[0], () => owner.updateConfiguration(...args)),
+    updateAndTransition: (...args: Parameters<typeof owner.updateAndTransition>) =>
+      withAgentRuntimeMutation(db, args[0], () => owner.updateAndTransition(...args)),
+  };
 }
 
 function trackedDriver(driver: lifecycle.LifecycleDriver): lifecycle.LifecycleDriver {

@@ -6,6 +6,7 @@ import type { RunnerIngressEndpoint } from "@paperclipai/adapter-utils/runner-co
 import { RUNNER_PRP_PROTOCOL_MIN, RUNNER_PRP_PROTOCOL_MAX, type RunnerProcessHandle, type RunnerProcessLaunchSpec,
   type DurablePrpControlPlane, type RunnerExecutionDriver, type RunnerLaunchPreparer, type DurableRecoveryIdentity } from "../../vendor/paperclip-runner/index.js";
 import { connectRunnerPrpIngress } from "../../realtime/runner-prp-outbound.js";
+import { assertNativeTaskAdmissionPermit, type NativeTaskAdmission } from "./native-task-admission.js";
 
 export async function verifyPluginRunnerTaskReattachment(
   task: (operation: unknown) => Promise<unknown>, identity: unknown,
@@ -27,7 +28,8 @@ export async function verifyPluginRunnerTaskReattachment(
  * No provider pid is treated as a local pid. Only executionStopped settles it.
  */
 export function createPluginRunnerTaskOwner(input: {
-  task: (operation: unknown) => Promise<unknown>;
+  task: (operation: unknown, context?: { admission?: { id: string; expiresAtMs: number } }) => Promise<unknown>;
+  admission?: NativeTaskAdmission;
   projectIds: readonly string[];
   harness: string;
   projectAuthCheckVersion?: 1;
@@ -67,10 +69,13 @@ export function createPluginRunnerTaskOwner(input: {
   void running.catch(() => undefined);
   if (input.adoptIdentity) markReady();
   const call = async (operation: PluginEnvironmentTaskOperation) => {
+    const admission = ["describe", "prepare", "check_project_auth", "connection"].includes(operation.kind) ? input.admission : undefined;
+    if (admission) assertNativeTaskAdmissionPermit(admission, admission);
     const phase = ({ prepare: "execution.plugin_prepare", check_project_auth: "execution.plugin_project_auth",
       submit: "execution.plugin_submit", connection: "execution.plugin_connection" } as const)[operation.kind as "prepare" | "check_project_auth" | "submit" | "connection"];
-    const result = environmentTaskResultSchema.parse(await (phase
-      ? measureRunPhase(phase, () => input.task(operation)) : input.task(operation)));
+    const invoke = () => admission ? input.task(operation, { admission }) : input.task(operation);
+    const result = environmentTaskResultSchema.parse(await (phase ? measureRunPhase(phase, invoke) : invoke()));
+    if (admission) assertNativeTaskAdmissionPermit(admission, admission);
     if (result.kind !== (operation.kind === "read_file" ? "file" : operation.kind === "describe" ? "description" : operation.kind === "prepare" ? "prepared" : operation.kind === "check_project_auth" ? "project_auth" : ["read_state", "archive_state"].includes(operation.kind) ? "state" : ["status", "connection", "credentials"].includes(operation.kind) ? operation.kind : "accepted")) {
       throw new Error("Plugin Runner returned an invalid operation result");
     }
@@ -300,6 +305,19 @@ export function createPluginRunnerTaskOwner(input: {
     };
   };
   const driver: RunnerExecutionDriver = {
+    withRetainedRunAdmission: async work => {
+      const admission = input.admission;
+      if (!admission) return work();
+      assertNativeTaskAdmissionPermit(admission, admission);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([Promise.resolve().then(work), new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("native_task_admission_expired")), Math.max(0, admission.expiresAtMs - Date.now()));
+        })]);
+        assertNativeTaskAdmissionPermit(admission, admission);
+        if (input.admission === admission) input = { ...input, admission: undefined };
+      } finally { clearTimeout(timer); }
+    },
     prepareLaunch, authorizeRunnerAdoption, readRunnerState, runnerProcessLauncher: launcher,
     // The provider resolves the authorized retained task before each state operation.
     prepareExternalRunnerState: async () => {},

@@ -1,4 +1,5 @@
 import { readTaskPanelActivations } from "../services/plugin-task-panels.js";
+import { waitForNativeTaskAdmissions } from "../services/native-runtime/native-task-admission.js";
 import { latestFailedRunsByAgent } from "@paperclipai/shared";
 import { agentConfigurationSpec } from "@paperclipai/shared";
 import { agentConfigurationRevision, restoreAgentConfigurationRedactions } from "../lib/agent-configuration-revision.js";
@@ -5775,6 +5776,7 @@ export function agentRoutes(
       return;
     }
 
+    await waitForNativeTaskAdmissions(db, agent.companyId, [id]);
     await heartbeat.cancelActiveForAgent(id);
 
     await logActivity(db, {

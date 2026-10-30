@@ -75,7 +75,7 @@ export function createAgentLifecycle(db: Db, effects: LifecycleEffects) {
     async updateConfiguration(id: string, data: AgentConfigurationPatch, options?: UpdateAgentOptions) {
       const existing = await records.getById(id);
       if (!existing) return null;
-      const agent = await effects.transaction(db, existing.companyId, (tx, publications) =>
+      const agent = await (effects.configurationTransaction ?? effects.transaction)(db, existing.companyId, (tx, publications) =>
         updateAgentConfiguration(tx, effects, id, data, options, publications));
       scheduleAgentLifecycle(db, id);
       return agent;
@@ -83,7 +83,7 @@ export function createAgentLifecycle(db: Db, effects: LifecycleEffects) {
     async updateAndTransition(id: string, command: "pause" | "resume" | "terminate", data: AgentConfigurationPatch, options?: UpdateAgentOptions) {
       const existing = await records.getById(id);
       if (!existing) return null;
-      const agent = await effects.transaction(db, existing.companyId, async (tx, publications) => {
+      const agent = await (effects.configurationTransaction ?? effects.transaction)(db, existing.companyId, async (tx, publications) => {
         await updateAgentConfiguration(tx, effects, id, data, options, publications);
         await createLifecycleStore(tx, effects).change(id, command, { reason: command === "resume" ? "user" : "manual" });
         return agentRecords(tx, effects).getById(id);

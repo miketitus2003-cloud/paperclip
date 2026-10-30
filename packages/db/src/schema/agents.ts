@@ -31,6 +31,7 @@ export const agents = pgTable(
     lifecycleVersion: integer("lifecycle_version").notNull().default(0),
     lifecycleError: text("lifecycle_error"),
     lifecycleOperation: jsonb("lifecycle_operation").$type<AgentLifecycleOperation>(),
+    runtimeMutation: jsonb("runtime_mutation").$type<{ owner: string; expiresAt: string }>(),
     reportsTo: uuid("reports_to").references((): AnyPgColumn => agents.id),
     capabilities: text("capabilities"),
     adapterType: text("adapter_type").notNull().default("process"),

@@ -4176,7 +4176,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     }
     const operation = Promise.resolve().then(() => {
       this.#assertStartupOpen();
-      return this.#attachRun(input);
+      return this.options.withRetainedRunAdmission
+        ? this.options.withRetainedRunAdmission(() => this.#attachRun(input))
+        : this.#attachRun(input);
+    }).catch(error => {
+      if (this.options.withRetainedRunAdmission) this.#failTransport(error instanceof Error ? error : new Error(String(error)));
+      throw error;
     }).finally(() => { this.#attachmentOperation = null; });
     this.#attachmentOperation = operation;
     return operation;
@@ -4689,6 +4694,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   }
 
   #assertStartupOpen(): void {
+    this.#throwIfFailed();
     if (this.#closed) throw new Error("runnerd transport closed during provider startup");
   }
 

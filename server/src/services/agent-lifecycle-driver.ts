@@ -6,6 +6,7 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import type { LifecycleDriver } from "../modules/agent-lifecycle/index.js";
 import { agentHarnessVerificationService } from "./agent-harness-verification.js";
 import { agentInstanceSecretService } from "./agent-instance-secrets.js";
+import { pendingNativeTaskAdmissionDeadline } from "./native-runtime/native-task-admission.js";
 
 export function createLifecycleDriver(db: Db, manager: PluginWorkerManager): LifecycleDriver {
   const { verify } = agentHarnessVerificationService(db, manager);
@@ -23,6 +24,7 @@ export function createLifecycleDriver(db: Db, manager: PluginWorkerManager): Lif
         plugin.manifestJson.agentLifecycle && plugin.manifestJson.capabilities.includes("agents.lifecycle.manage")).map(plugin => plugin.id);
     },
     async runPlugin(agent, pluginId) {
+      if (await pendingNativeTaskAdmissionDeadline(db, agent.companyId, [agent.id])) return "pending";
       const [plugin] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
       const [settings] = await db.select().from(pluginCompanySettings).where(and(
         eq(pluginCompanySettings.pluginId, pluginId), eq(pluginCompanySettings.companyId, agent.companyId)));
@@ -43,6 +45,7 @@ export function createLifecycleDriver(db: Db, manager: PluginWorkerManager): Lif
       return result.status;
     },
     async runHost(agent) {
+      if (await pendingNativeTaskAdmissionDeadline(db, agent.companyId, [agent.id])) return "pending";
       if (agent.lifecycleState === "verifying") return verify(agent);
       if (["pausing", "terminating", "cleaning_up"].includes(agent.lifecycleState)) {
         const ids = agent.lifecycleState === "pausing" ? [agent.id]

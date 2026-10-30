@@ -5,7 +5,8 @@ import { releaseProviderRecoveryTransfers, stageProviderFreshWorkspace } from ".
 import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { settlePluginTaskCredentialHandoff } from "./plugin-task-credential-writeback.js";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { environmentLeases, executionWorkspaces, environments, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
+import { environmentLeases, executionWorkspaces, environments, heartbeatRuns, issues, nativeRunFinalizations, projects, type Db } from "@paperclipai/db";
+import { assertNativeTaskAdmissionPermit, type NativeTaskAdmission } from "./native-runtime/native-task-admission.js";
 import { freshWorkspaceSchema, environmentTaskOperationSchema, parseEnvironmentTaskResult, type PluginEnvironmentTaskOperation } from "@paperclipai/plugin-sdk";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -31,17 +32,35 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
   companyId: string;
   leaseId: string;
   operation: PluginEnvironmentTaskOperation;
+  admission?: unknown;
 }) {
   const operation = environmentTaskOperationSchema.parse(input.operation);
-  const [row] = await db.select({ lease: environmentLeases, environment: environments, run: heartbeatRuns })
+  const [row] = await db.select({ lease: environmentLeases, environment: environments, run: heartbeatRuns,
+    admission: { owner: nativeRunFinalizations.admissionOwner, expiresAt: nativeRunFinalizations.admissionExpiresAt,
+      finishedAt: nativeRunFinalizations.admissionFinishedAt, leaseOwner: nativeRunFinalizations.leaseOwner,
+      generation: nativeRunFinalizations.controllerGeneration,
+      ownerLive: sql<boolean>`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()` } })
     .from(environmentLeases)
     .leftJoin(environments, eq(environments.id, environmentLeases.environmentId))
     .leftJoin(heartbeatRuns, and(eq(heartbeatRuns.id, environmentLeases.heartbeatRunId), eq(heartbeatRuns.companyId, environmentLeases.companyId)))
+    .leftJoin(nativeRunFinalizations, and(eq(nativeRunFinalizations.runId, heartbeatRuns.id), eq(nativeRunFinalizations.companyId, heartbeatRuns.companyId)))
     .where(and(eq(environmentLeases.id, input.leaseId), eq(environmentLeases.companyId, input.companyId))).limit(1);
   if (!row || !row.lease.providerLeaseId) throw new Error("Plugin-provided Runner execution lease unavailable");
   const { lease, environment, run } = row;
+  let admission: NativeTaskAdmission | undefined;
+  if (input.admission !== undefined) {
+    if (!run || !["describe", "prepare", "check_project_auth", "connection"].includes(operation.kind)) throw new Error("native_task_admission_scope_changed");
+    assertNativeTaskAdmissionPermit(input.admission, { companyId: input.companyId, agentId: run.agentId, runId: run.id });
+    admission = input.admission;
+    if (admission.leaseId !== lease.id || admission.taskId !== lease.providerLeaseId || admission.environmentId !== environment?.id ||
+        row.admission?.owner !== admission.id || row.admission.leaseOwner !== admission.leaseOwner ||
+        row.admission.generation !== admission.controllerGeneration || row.admission.finishedAt || !row.admission.ownerLive ||
+        !row.admission.expiresAt || row.admission.expiresAt.getTime() <= Date.now()) throw new Error("native_task_admission_lost");
+  }
   const taskId = row.lease.providerLeaseId;
-  const metadata = lease.metadata ?? {};
+  const metadata = { ...lease.metadata };
+  delete metadata.runnerTaskAdmission;
+  delete metadata.runnerTaskAdmissionSupported;
   const probe = metadata.runnerTaskProbe as { runId?: unknown; sessionId?: unknown; expiresAtMs?: unknown } | undefined;
   const activeProbe = lease.heartbeatRunId === null && lease.issueId === null && probe
     && typeof probe.runId === "string" && typeof probe.sessionId === "string"
@@ -225,6 +244,7 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
         projectIds, lease: {providerLeaseId: taskId, metadata}, operation:{kind:"status"},
       }));
       if (state.kind === "status" && state.executionStopped === true) {
+        if (admission) throw new Error("native_task_admission_task_stopped");
         await executeEnvironmentTask(db, workers, {...input, operation:{kind:"status"}});
         await executeEnvironmentTask(db, workers, {...input, operation:{kind:"complete"}});
         // Preserve the predecessor's stop proof for checkpoint authorization.
@@ -275,14 +295,21 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
         return snapshot.credential;
       });
     }
-    const result = await workers.call(plugin.id, "environmentTask", {
+    const params = {
       driverKey: metadata.driverKey, companyId: input.companyId, environmentId: environment?.id ?? null,
       issueId: lease.issueId, config: driverConfig,
       taskId, runId: run?.id ?? (activeProbe ? String(probe.runId) : null), agentId: run?.agentId ?? null, projectIds,
-      lease: { providerLeaseId: lease.providerLeaseId, metadata: lease.metadata ?? undefined },
+      lease: { providerLeaseId: lease.providerLeaseId, metadata: { ...metadata, runnerTaskAdmissionSupported: 1,
+        ...(admission ? { runnerTaskAdmission: { id: admission.id, expiresAtMs: admission.expiresAtMs,
+          lifecycleVersion: admission.lifecycleVersion, agentStatus: admission.agentStatus, runtimeRevision: admission.runtimeRevision } } : {}) } },
       ...(workspaceBinding ? { workspace: workspaceBinding } : {}),
       ...(freshWorkspace && scopesProjects ? { fresh: freshWorkspace } : {}), operation,
-    }, operation.kind === "copilot_metadata" ? Math.max(1, Math.min(40_000, Number(probe?.expiresAtMs) - Date.now())) : 15_000);
+    };
+    const timeout = operation.kind === "copilot_metadata" ? Math.max(1, Math.min(40_000, Number(probe?.expiresAtMs) - Date.now()))
+      : admission ? Math.max(1, Math.min(15_000, admission.expiresAtMs - Date.now())) : 15_000;
+    const result = admission ? await workers.call(plugin.id, "environmentTask", params, timeout, undefined, admission)
+      : await workers.call(plugin.id, "environmentTask", params, timeout);
+    if (admission) assertNativeTaskAdmissionPermit(admission, admission);
     const parsed = parseEnvironmentTaskResult(operation, taskId, result);
     if (operation.kind === "read_file") {
       const [current] = await db.select({ lease: environmentLeases, run: heartbeatRuns }).from(environmentLeases)

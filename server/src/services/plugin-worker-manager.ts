@@ -67,6 +67,7 @@ import {
 } from "./login-command.js";
 import { logger } from "../middleware/logger.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
+import { assertNativeTaskAdmissionPermit, withNativeTaskAdmissionHostCall, type NativeTaskAdmission } from "./native-runtime/native-task-admission.js";
 import { context as otelContext } from "@opentelemetry/api";
 import { traceparentFromContextToken } from "../instrumentation.js";
 
@@ -541,6 +542,7 @@ interface PendingRequest {
 }
 
 interface ActiveInvocation {
+  nativeTaskAdmission?: NativeTaskAdmission;
   providerSpanBudget: {remaining:number};
   scope: PluginInvocationScope;
   timer?: ReturnType<typeof setTimeout>;
@@ -720,6 +722,7 @@ export interface PluginWorkerHandle {
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
     onWorkerSettled?: () => void,
+    nativeTaskAdmission?: NativeTaskAdmission,
   ): Promise<HostToWorkerMethods[M][1]>;
 
   /**
@@ -856,6 +859,7 @@ export interface PluginWorkerManager {
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
+    nativeTaskAdmission?: NativeTaskAdmission,
   ): Promise<HostToWorkerMethods[M][1]>;
 
   /**
@@ -1200,7 +1204,29 @@ export function createPluginWorkerHandle(
     return null;
   }
 
-  function registerInvocation(scope: PluginInvocationScope, ttlMs?: number): PluginInvocationContext {
+  function validateNativeTaskAdmissionCall(method: string, params: unknown, admission?: NativeTaskAdmission): void {
+    const input = isRecord(params) ? params : {};
+    const lease = isRecord(input.lease) ? input.lease : {};
+    const metadata = isRecord(lease.metadata) ? lease.metadata : {};
+    const wire = metadata.runnerTaskAdmission;
+    if (!admission) {
+      if (method === "environmentTask" && wire !== undefined) throw new Error("native_task_admission_unissued");
+      return;
+    }
+    assertNativeTaskAdmissionPermit(admission, {
+      companyId: readNonEmptyString(input.companyId) ?? "",
+      agentId: readNonEmptyString(input.agentId) ?? "",
+      runId: readNonEmptyString(input.runId) ?? "",
+    });
+    if (method !== "environmentTask" || admission.pluginId !== pluginId || input.environmentId !== admission.environmentId ||
+        input.taskId !== admission.taskId || lease.providerLeaseId !== admission.taskId || !isRecord(wire) ||
+        wire.id !== admission.id || wire.expiresAtMs !== admission.expiresAtMs || wire.lifecycleVersion !== admission.lifecycleVersion ||
+        wire.runtimeRevision !== admission.runtimeRevision || wire.agentStatus !== admission.agentStatus) {
+      throw new Error("native_task_admission_scope_mismatch");
+    }
+  }
+
+  function registerInvocation(scope: PluginInvocationScope, ttlMs?: number, nativeTaskAdmission?: NativeTaskAdmission): PluginInvocationContext {
     // Keep the owning operation's parent host-side; workspace/runtime operations
     // use the same per-invocation contract as measured provider startup.
     const activeStep = getActiveStepContext();
@@ -1212,7 +1238,7 @@ export function createPluginWorkerHandle(
       scope,
       ...(traceparent ? { traceparent } : {}),
     };
-    const entry: ActiveInvocation = { scope, traceparent, providerSpanBudget:{remaining:256} };
+    const entry: ActiveInvocation = { scope, traceparent, providerSpanBudget:{remaining:256}, ...(nativeTaskAdmission ? { nativeTaskAdmission } : {}) };
     if (ttlMs !== undefined) {
       entry.timer = setTimeout(() => {
         activeInvocations.delete(invocation.id);
@@ -2793,7 +2819,9 @@ export function createPluginWorkerHandle(
     }
 
     try {
-      const result = await handler(request.params, contextForWorkerMessage(request));
+      const invocationId = readNonEmptyString((request as { paperclipInvocationId?: unknown }).paperclipInvocationId);
+      const admission = invocationId ? activeInvocations.get(invocationId)?.nativeTaskAdmission : undefined;
+      const result = await withNativeTaskAdmissionHostCall(admission, () => handler(request.params, contextForWorkerMessage(request)));
       sendMessage({
         jsonrpc: JSONRPC_VERSION,
         id: request.id,
@@ -3378,8 +3406,9 @@ export function createPluginWorkerHandle(
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
     onWorkerSettled?: () => void,
+    nativeTaskAdmission?: NativeTaskAdmission,
   ): Promise<HostToWorkerMethods[M][1]> {
-    const dispatched = measureRunPhase("execution.plugin_dispatch", () => callInternalRaw(method, params, timeoutMs, executeLogSink, onWorkerSettled));
+    const dispatched = measureRunPhase("execution.plugin_dispatch", () => callInternalRaw(method, params, timeoutMs, executeLogSink, onWorkerSettled, nativeTaskAdmission));
     // Tracing wraps the RPC in a new promise. Guard the promise handed to the
     // caller as well, without swallowing its eventual rejection for that caller.
     void dispatched.catch(() => undefined);
@@ -3392,6 +3421,7 @@ export function createPluginWorkerHandle(
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
     onWorkerSettled?: () => void,
+    nativeTaskAdmission?: NativeTaskAdmission,
   ): Promise<HostToWorkerMethods[M][1]> {
     const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
       const idleControl = method === "prepareIdleSleep" || method === "releaseIdleSleep";
@@ -3410,6 +3440,13 @@ export function createPluginWorkerHandle(
         return;
       }
 
+      try {
+        validateNativeTaskAdmissionCall(method, params, nativeTaskAdmission);
+      } catch (error) {
+        onWorkerSettled?.();
+        reject(error);
+        return;
+      }
       const id = nextRequestId++;
       if (!idleControl) {
         const finishIdle = beginIdleTrackedWork();
@@ -3425,9 +3462,10 @@ export function createPluginWorkerHandle(
         unsettledCalls.set(id, finish);
         if (method === "environmentInspectLease") unsettledInspections.add(finish);
       }
-      const timeout = resolveRpcCallTimeoutMs(timeoutMs, rpcTimeoutMs);
+      const timeout = Math.min(resolveRpcCallTimeoutMs(timeoutMs, rpcTimeoutMs),
+        nativeTaskAdmission ? Math.max(1, nativeTaskAdmission.expiresAtMs - Date.now()) : Infinity);
       const invocationScope = deriveInvocationScope(method, params);
-      const invocation = invocationScope ? registerInvocation(invocationScope) : null;
+      const invocation = invocationScope ? registerInvocation(invocationScope, undefined, nativeTaskAdmission) : null;
       // Register the host-owned execute route only for an execute call that
       // carries a log sink. The company id comes from the host-derived
       // invocation scope, never from the worker. This binds the sink to the
@@ -3581,6 +3619,7 @@ export function createPluginWorkerHandle(
       timeoutMs?: number,
       executeLogSink?: ExecuteLogSink,
       onWorkerSettled?: () => void,
+      nativeTaskAdmission?: NativeTaskAdmission,
     ): Promise<HostToWorkerMethods[M][1]> {
       if (status !== "running" && status !== "starting") {
         onWorkerSettled?.();
@@ -3590,7 +3629,7 @@ export function createPluginWorkerHandle(
           ),
         );
       }
-      return callInternal(method, params, timeoutMs, executeLogSink, onWorkerSettled);
+      return callInternal(method, params, timeoutMs, executeLogSink, onWorkerSettled, nativeTaskAdmission);
     },
 
     openLoginPtySession(input: LoginPtyOpenInput) {
@@ -3931,6 +3970,7 @@ export function createPluginWorkerManager(
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
       executeLogSink?: ExecuteLogSink,
+      nativeTaskAdmission?: NativeTaskAdmission,
     ): Promise<HostToWorkerMethods[M][1]> {
       const handle = workers.get(pluginId);
       if (!handle) {
@@ -3947,7 +3987,7 @@ export function createPluginWorkerManager(
       }
       // A caller timeout is not worker completion. Inspection capacity is
       // released only by its actual reply, send failure, or worker exit.
-      const result = handle.call(method, params, timeoutMs, executeLogSink, finishInspection);
+      const result = handle.call(method, params, timeoutMs, executeLogSink, finishInspection, nativeTaskAdmission);
       if (method === "configChanged") void result.then(() => {
         for (const listener of configApplied) {
           try { listener(); }

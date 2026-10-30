@@ -12,11 +12,17 @@ import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { agentInstanceSecretService } from "./agent-instance-secrets.js";
 import { environmentSkillConfig } from "./environment-skills.js";
+import { assertNativeTaskAdmissionPermit, assertNativeTaskAdmissionCurrent, type NativeTaskAdmission } from "./native-runtime/native-task-admission.js";
 
-async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly: true): Promise<PluginAgentRuntimeIdentity | null>;
-async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly?: false): Promise<Omit<PluginAgentRuntimeState, "skills" | "connectionAssignments"> | null>;
-async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly = false): Promise<PluginAgentRuntimeIdentity | Omit<PluginAgentRuntimeState, "skills" | "connectionAssignments"> | null> {
-  return db.transaction(async tx => {
+async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly: true, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeIdentity | null>;
+async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly?: false, admission?: NativeTaskAdmission): Promise<Omit<PluginAgentRuntimeState, "skills" | "connectionAssignments"> | null>;
+async function readState(db: Db, pluginId: string, companyId: string, agentId: string, identityOnly = false, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeIdentity | Omit<PluginAgentRuntimeState, "skills" | "connectionAssignments"> | null> {
+  if (admission) {
+    assertNativeTaskAdmissionPermit(admission, { companyId, agentId, runId: admission.runId });
+    if (admission.pluginId !== pluginId) throw new Error("native_task_admission_scope_mismatch");
+    await assertNativeTaskAdmissionCurrent(db, admission);
+  }
+  const state = await db.transaction(async tx => {
     const [agent] = await tx.select().from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.id, agentId))).for("share");
     if (!agent) return null;
@@ -44,19 +50,29 @@ async function readState(db: Db, pluginId: string, companyId: string, agentId: s
       instanceSecrets: await agentInstanceSecretService(tx as unknown as Db).read({ companyId, agentId, pluginId }),
     };
   });
+  if (admission) {
+    await assertNativeTaskAdmissionCurrent(db, admission);
+    if (state) return { ...state, revision: admission.runtimeRevision, agent: { ...state.agent,
+      status: admission.agentStatus as PluginAgentRuntimeIdentity["agent"]["status"],
+      lifecycleState: "ready", lifecycleVersion: admission.lifecycleVersion } };
+  }
+  return state;
 }
 
 
-export async function pluginAgentRuntimeIdentity(db: Db, pluginId: string, companyId: string, agentId: string): Promise<PluginAgentRuntimeIdentity | null> {
-  return readState(db, pluginId, companyId, agentId, true);
+export async function pluginAgentRuntimeIdentity(db: Db, pluginId: string, companyId: string, agentId: string, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeIdentity | null> {
+  return readState(db, pluginId, companyId, agentId, true, admission);
 }
 
-export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string, environmentId?: string, installEnvironmentSkills = false): Promise<PluginAgentRuntimeState | null> {
+export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string, environmentId?: string, installEnvironmentSkills = false, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeState | null> {
+  if (admission && environmentId !== undefined && environmentId !== admission.environmentId) {
+    throw new Error("native_task_admission_scope_mismatch");
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
-    const state = await readState(db, pluginId, companyId, agentId);
+    const state = await readState(db, pluginId, companyId, agentId, false, admission);
     if (!state) return null;
     const instance = await instanceSettingsService(db).get();
-    const effectiveEnvironmentId = environmentId ?? state.agent.defaultEnvironmentId ?? instance.defaultEnvironmentId;
+    const effectiveEnvironmentId = admission?.environmentId ?? environmentId ?? state.agent.defaultEnvironmentId ?? instance.defaultEnvironmentId;
     const [environment] = effectiveEnvironmentId
       ? await db.select().from(environments).where(eq(environments.id, effectiveEnvironmentId)) : [];
     if (environmentId && !environment) throw unprocessable("The selected environment is unavailable");
@@ -75,7 +91,7 @@ export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyI
     const fallback = !state.instructionsRootPath ? await agentInstructionsService().exportFiles(state.agent, { rejectSymlinks: true }) : null;
     const entryFile = fallback?.entryFile ?? state.instructionsEntryFile;
     const entryContent = fallback?.files[entryFile];
-    const current = await readState(db, pluginId, companyId, agentId);
+    const current = await readState(db, pluginId, companyId, agentId, false, admission);
     if (!current) return null;
     if (current.revision === state.revision) return { ...current, instructionsEntryFile: entryFile, ...(entryContent === undefined ? {} : { instructionsEntryContent: entryContent }), skills, connectionAssignments, ...(shadowedSkills?.length ? { shadowedSkills } : {}) };
   }

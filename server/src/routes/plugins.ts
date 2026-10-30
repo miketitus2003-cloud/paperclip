@@ -2416,17 +2416,12 @@ export function pluginRoutes(
     try {
       const secretRefs = extractSecretRefBindingsFromConfig(body.configJson, schema);
       await validatePluginSecretRefsForCompany(companyId, secretRefs);
-      await secretService(db).syncSecretRefsForTarget(
-        companyId,
-        { targetType: "plugin", targetId: plugin.id },
-        secretRefs,
-        { replaceAll: true },
-      );
-
       const result = await registry.upsertConfig(plugin.id, companyId, {
         companyId,
         configJson: body.configJson,
-      });
+      }, transaction => secretService(transaction).syncSecretRefsForTarget(
+        companyId, { targetType: "plugin", targetId: plugin.id }, secretRefs, { replaceAll: true },
+      ));
       await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,

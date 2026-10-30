@@ -33,6 +33,9 @@ export const nativeRunFinalizations = pgTable(
       withTimezone: true,
     }),
     controllerGeneration: integer("controller_generation").notNull().default(0),
+    admissionOwner: text("admission_owner"),
+    admissionExpiresAt: timestamp("admission_expires_at", { withTimezone: true }),
+    admissionFinishedAt: timestamp("admission_finished_at", { withTimezone: true }),
     recoveryState: text("recovery_state"),
     recoveryRequestId: text("recovery_request_id"),
     recoveryHistory: jsonb("recovery_history")
@@ -58,6 +61,9 @@ export const nativeRunFinalizations = pgTable(
       .where(sql`${table.phase} = 'terminal_failure' AND ${table.failureCode} = 'native_workspace_sync_out_unsafe_archive'`),
     controlDeadlineIdx: index("native_run_finalizations_control_deadline_idx")
       .on(table.controlDeadlineAt).where(sql`${table.controlDeadlineAt} is not null`),
+    pendingAdmissionIdx: index("native_run_finalizations_pending_admission_idx")
+      .on(table.companyId, table.admissionExpiresAt)
+      .where(sql`${table.admissionOwner} is not null and ${table.admissionFinishedAt} is null`),
     issueCompanyFk: foreignKey({
       columns: [table.companyId, table.issueId],
       foreignColumns: [issues.companyId, issues.id],

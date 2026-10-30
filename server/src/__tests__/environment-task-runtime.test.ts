@@ -31,7 +31,7 @@ function database(value: ReturnType<typeof row> | null = row(), projectRows = [{
   return { db: db as unknown as Db, query, sets, transaction: db.transaction };
 }
 function worker(result: unknown = { kind: "accepted", taskId: "attempt-1" }) {
-  return { getWorker: vi.fn(() => ({ supportedMethods: ["environmentTask"] })), call: vi.fn(async () => result) };
+  return { getWorker: vi.fn(() => ({ supportedMethods: ["environmentTask"] })), call: vi.fn(async (..._args: unknown[]) => result) };
 }
 const submit = { kind: "submit" as const, preparedLaunchId: "configuration", projectIds: [projectId], runner: { protocolMin: 1, protocolMax: 2, harness: "codex", runnerId: "runner", leaseId, runId: "run", sessionId: "session", turnId: "turn", itemId: "item" }, bootstrapTicket: "transient-test-ticket" };
 
@@ -40,6 +40,27 @@ beforeEach(() => {
   state.plugin = { id: "original", pluginKey: "test.provider", status: "ready", manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true }] } };
 });
 describe("plugin-provided Runner execution", () => {
+  it("negotiates host support without trusting a persisted grant or requiring an older plugin to advertise it", async () => {
+    const value = row();
+    Object.assign(value.lease.metadata, { runnerTaskAdmission: { id: "serialized-grant", expiresAtMs: Date.now() + 30_000 },
+      runnerTaskAdmissionSupported: 99 });
+    const description = { kind: "description", taskId: "attempt-1", runner: { version: "fixture", digest: `sha256:${"a".repeat(64)}` } };
+    const workers = worker(description);
+    const result = await executeEnvironmentTask(database(value).db, workers as never, { companyId: "company", leaseId, operation: { kind: "describe" } });
+    expect(result).toEqual(description);
+    const params = workers.call.mock.calls[0]![2] as { lease: { metadata: Record<string, unknown> } };
+    expect(params.lease.metadata.runnerTaskAdmissionSupported).toBe(1);
+    expect(params.lease.metadata).not.toHaveProperty("runnerTaskAdmission");
+    expect(workers.call.mock.calls[0]).toHaveLength(4);
+  });
+
+  it("rejects an unissued in-process grant before invoking a plugin", async () => {
+    const workers = worker();
+    await expect(executeEnvironmentTask(database().db, workers as never, { companyId: "company", leaseId,
+      operation: { kind: "describe" }, admission: { id: "forged", expiresAtMs: Date.now() + 30_000 } })).rejects.toThrow("native_task_admission_expired");
+    expect(workers.call).not.toHaveBeenCalled();
+  });
+
   it("forwards a retained fresh directory intent on later launch calls and checks provider support", async () => {
     const value = row();
     value.lease.metadata.runnerTaskProjectAuthValidation.projectIds = [];
