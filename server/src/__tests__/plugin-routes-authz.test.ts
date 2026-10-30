@@ -325,7 +325,10 @@ describe("plugin install and upgrade authz", () => {
     };
     mockSecretService.getById.mockResolvedValue({ id: secretId, companyId: companyA, status: "active" });
     mockSecretService.syncSecretRefsForTarget.mockResolvedValue([]);
-    mockRegistry.upsertConfig.mockResolvedValue({ id: "config-1", pluginId, companyId: companyA, configJson });
+    mockRegistry.upsertConfig.mockImplementation(async (_pluginId, _companyId, _input, syncBindings) => {
+      await syncBindings({});
+      return { id: "config-1", pluginId, companyId: companyA, configJson };
+    });
 
     const { app } = await createApp({
       type: "board",
@@ -350,7 +353,7 @@ describe("plugin install and upgrade authz", () => {
     expect(mockRegistry.upsertConfig).toHaveBeenCalledWith(pluginId, companyA, {
       companyId: companyA,
       configJson,
-    });
+    }, expect.any(Function));
   }, 20_000);
 
   it("rejects plugin config saves that reference another company's secret before syncing bindings", async () => {

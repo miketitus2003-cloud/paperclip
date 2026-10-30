@@ -5,7 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, companySecrets, createDb, environmentLeases, environments, heartbeatRuns, issues, nativeRunFinalizations, plugins } from "@paperclipai/db";
+import { agents, companies, companySecrets, createDb, environmentLeases, environments, heartbeatRuns, issues, nativeRunFinalizations, plugins,
+  toolApplications, toolConnections, toolConnectionInstalls } from "@paperclipai/db";
 import { createHostClientHandlers, type HostToWorkerMethods } from "@paperclipai/plugin-sdk";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { buildHostServices } from "../services/plugin-host-services.js";
@@ -14,7 +15,9 @@ import { createPluginWorkerHandle } from "../services/plugin-worker-manager.js";
 import { beginNativeTaskAdmission, currentNativeTaskAdmissionHostCall, finishNativeTaskAdmission,
   withNativeTaskAdmissionHostCall } from "../services/native-runtime/native-task-admission.js";
 import { secretService } from "../services/secrets.js";
+import { withPluginRuntimeMutation } from "../services/native-runtime/plugin-runtime-mutation.js";
 import * as instructionModule from "../services/agent-instructions.js";
+import * as connectionModule from "../services/plugin-agent-connections.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("issued native admission in worker host calls", () => {
@@ -40,7 +43,7 @@ const support = await getEmbeddedPostgresTestSupport();
     vi.unstubAllEnvs();
   });
 
-  async function seed(existingPluginId?: string) {
+  async function seed(existingPluginId?: string, admissionTimeoutMs?: number) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID(),
       pluginId = existingPluginId ?? randomUUID(), environmentId = randomUUID(), leaseId = randomUUID(), leaseOwner = randomUUID();
     const manifest = { id: `admission-${pluginId}`, apiVersion: 1 as const, version: "1.0.0", displayName: "Admission fixture",
@@ -58,7 +61,7 @@ const support = await getEmbeddedPostgresTestSupport();
       leaseOwner, controllerGeneration: 3, leaseExpiresAt: new Date(Date.now() + 60_000) });
     const scope = { companyId, agentId, runId, leaseId, leaseOwner, pluginId };
     await secretService(db).agentInstance.set({ companyId, agentId, pluginId }, "runtime", "disposable-runtime-value");
-    const admission = await beginNativeTaskAdmission(db, scope);
+    const admission = await beginNativeTaskAdmission(db, scope, admissionTimeoutMs);
     cleanups.push(() => finishNativeTaskAdmission(db, admission));
     return { ...scope, environmentId, admission, manifest };
   }
@@ -134,6 +137,40 @@ const support = await getEmbeddedPostgresTestSupport();
     } finally { now.mockRestore(); }
   });
 
+  it("keeps a timed-out caller's reservation while its real worker can still continue", async () => {
+    const f = await seed(undefined, 2_000), order: string[] = [];
+    let entered!: () => void, release!: () => void, settled!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const completed = new Promise<void>(resolve => { settled = resolve; });
+    const { handle } = await worker(f, async () => { entered(); await gate; });
+    const result = handle.call("environmentTask", params(f), 200, undefined, () => {
+      order.push("worker settled"); settled();
+    }, f.admission).catch(error => error);
+    let writing: Promise<unknown> | undefined;
+    try {
+      await ready;
+      expect(await result).toMatchObject({ message: expect.stringContaining("timed out after 200ms") });
+      await finishNativeTaskAdmission(db, f.admission);
+      const [held] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.runId));
+      expect(held.admissionFinishedAt).toBeNull();
+      writing = withPluginRuntimeMutation(db, f.pluginId, f.companyId, async () => { order.push("writer committed"); });
+      await vi.waitFor(async () => {
+        const [plugin] = await db.select().from(plugins).where(eq(plugins.id, f.pluginId));
+        expect(plugin.runtimeMutations[f.companyId]?.owner).toBeTruthy();
+      });
+      expect(order).toEqual([]);
+      release();
+      await completed;
+      expect(order).toEqual(["worker settled"]);
+      await writing;
+      expect(order).toEqual(["worker settled", "writer committed"]);
+      expect(Date.now()).toBeGreaterThanOrEqual(f.admission.expiresAtMs);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
+      expect(run.status).toBe("running");
+    } finally { release(); await result; await writing; }
+  });
+
   it("fails closed for lost or expired markers before returning identity", async () => {
     const f = await seed(), { services } = await worker(f);
     await db.update(nativeRunFinalizations).set({ admissionOwner: randomUUID() }).where(eq(nativeRunFinalizations.runId, f.runId));
@@ -161,6 +198,31 @@ const support = await getEmbeddedPostgresTestSupport();
       await db.update(nativeRunFinalizations).set({ admissionOwner: randomUUID() }).where(eq(nativeRunFinalizations.runId, f.runId));
     } finally { release(); }
     await expect(pending).rejects.toThrow("native_task_admission_lost");
+  });
+
+  it("retries a live connection change before projecting the admitted revision", async () => {
+    const f = await seed(), { services } = await worker(f);
+    const [application] = await db.insert(toolApplications).values({ companyId: f.companyId, name: "Admission connection", type: "mcp_http" }).returning();
+    const [connection] = await db.insert(toolConnections).values({ companyId: f.companyId, applicationId: application.id,
+      name: "Admission connection", uid: randomUUID(), transport: "mcp_remote", enabled: true }).returning();
+    await db.insert(toolConnectionInstalls).values({ companyId: f.companyId, connectionId: connection.id, targetType: "agent", targetId: f.agentId });
+    const original = connectionModule.pluginAgentConnectionAssignments;
+    let changed = false;
+    const assignment = vi.spyOn(connectionModule, "pluginAgentConnectionAssignments").mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (!changed) {
+        changed = true;
+        expect(result.connections[0]?.enabled).toBe(true);
+        await db.update(toolConnections).set({ enabled: false }).where(eq(toolConnections.id, connection.id));
+      }
+      return result;
+    });
+    const result = await withNativeTaskAdmissionHostCall(f.admission, () => services.agents.getRuntime!({
+      companyId: f.companyId, agentId: f.agentId, environmentId: f.environmentId,
+    }));
+    expect(assignment).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ revision: f.admission.runtimeRevision,
+      connectionAssignments: { connections: [{ id: connection.id, enabled: false }] } });
   });
 
   it("isolates overlapping invocation admissions in one worker", async () => {

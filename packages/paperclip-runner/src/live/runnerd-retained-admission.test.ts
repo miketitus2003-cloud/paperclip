@@ -19,3 +19,17 @@ it("retains an expired admission failure before attach or a later turn can start
     expect(bundle.evidence().runnerPid).toBeNull();
   } finally { await bundle.transport.close(); await rm(stateDirectory, { recursive: true, force: true }); }
 });
+
+it("keeps unrelated preparation failures outside the admission expiry fence", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "runner-retained-admission-error-"));
+  const admission = vi.fn(async (_work: () => Promise<void>) => { throw new Error("fixture preparation rejected"); });
+  const bundle = createCapabilityRunnerdCodexTransport({ stateDirectory, withRetainedRunAdmission: admission });
+  try {
+    for (const runId of ["first", "retry"]) {
+      await expect(bundle.transport.attachRun!({ runId, turnId: "turn", itemId: "item" }))
+        .rejects.toThrow("fixture preparation rejected");
+    }
+    expect(admission).toHaveBeenCalledTimes(2);
+    expect(bundle.evidence().runnerPid).toBeNull();
+  } finally { await bundle.transport.close(); await rm(stateDirectory, { recursive: true, force: true }); }
+});

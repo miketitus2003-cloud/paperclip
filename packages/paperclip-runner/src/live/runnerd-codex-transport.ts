@@ -4180,7 +4180,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         ? this.options.withRetainedRunAdmission(() => this.#attachRun(input))
         : this.#attachRun(input);
     }).catch(error => {
-      if (this.options.withRetainedRunAdmission) this.#failTransport(error instanceof Error ? error : new Error(String(error)));
+      if (this.options.withRetainedRunAdmission && error instanceof Error && error.message === "native_task_admission_expired") this.#failTransport(error);
       throw error;
     }).finally(() => { this.#attachmentOperation = null; });
     this.#attachmentOperation = operation;
@@ -4694,7 +4694,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   }
 
   #assertStartupOpen(): void {
-    this.#throwIfFailed();
+    if (this.#failure?.message === "native_task_admission_expired") this.#throwIfFailed();
     if (this.#closed) throw new Error("runnerd transport closed during provider startup");
   }
 

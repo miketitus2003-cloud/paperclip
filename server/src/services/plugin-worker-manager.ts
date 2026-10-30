@@ -67,7 +67,7 @@ import {
 } from "./login-command.js";
 import { logger } from "../middleware/logger.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
-import { assertNativeTaskAdmissionPermit, withNativeTaskAdmissionHostCall, type NativeTaskAdmission } from "./native-runtime/native-task-admission.js";
+import { assertNativeTaskAdmissionPermit, trackNativeTaskAdmissionInvocation, withNativeTaskAdmissionHostCall, type NativeTaskAdmission } from "./native-runtime/native-task-admission.js";
 import { context as otelContext } from "@opentelemetry/api";
 import { traceparentFromContextToken } from "../instrumentation.js";
 
@@ -3450,10 +3450,12 @@ export function createPluginWorkerHandle(
       const id = nextRequestId++;
       if (!idleControl) {
         const finishIdle = beginIdleTrackedWork();
+        const finishAdmission = nativeTaskAdmission ? trackNativeTaskAdmissionInvocation(nativeTaskAdmission) : undefined;
         let completed = false;
         const finish = () => {
           if (completed) return;
           completed = true;
+          finishAdmission?.();
           finishIdle();
           unsettledInspections.delete(finish);
           unsettledCalls.delete(id);

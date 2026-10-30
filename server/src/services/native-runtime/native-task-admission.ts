@@ -5,6 +5,7 @@ import { environmentLeases, heartbeatRuns, nativeRunFinalizations, type Db } fro
 import { DELIVERY_QUEUES, notifyDeliveryWork, subscribeDeliveryWork } from "../delivery-work-notifications.js";
 
 const permits = new WeakSet<NativeTaskAdmission>();
+const workerCalls = new WeakMap<NativeTaskAdmission, Set<object>>();
 const hostCalls = new AsyncLocalStorage<NativeTaskAdmission | undefined>();
 export const NATIVE_TASK_ADMISSION_TIMEOUT_MS = 30_000;
 
@@ -31,6 +32,13 @@ export function withNativeTaskAdmissionHostCall<T>(admission: NativeTaskAdmissio
 
 export function currentNativeTaskAdmissionHostCall(): NativeTaskAdmission | undefined {
   return hostCalls.getStore();
+}
+
+export function trackNativeTaskAdmissionInvocation(admission: NativeTaskAdmission): () => void {
+  const calls = workerCalls.get(admission) ?? new Set<object>(), call = {};
+  workerCalls.set(admission, calls);
+  calls.add(call);
+  return () => { calls.delete(call); };
 }
 
 export function assertNativeTaskAdmissionPermit(admission: unknown, scope: {
@@ -188,6 +196,7 @@ export async function assertNativeTaskAdmissionCurrent(db: Db, admission: Native
 }
 
 export async function finishNativeTaskAdmission(db: Db, admission: NativeTaskAdmission): Promise<void> {
+  if (workerCalls.get(admission)?.size) return;
   try {
     await db.transaction(async tx => {
       await notifyDeliveryWork(tx as unknown as Db, DELIVERY_QUEUES.agentLifecycle);

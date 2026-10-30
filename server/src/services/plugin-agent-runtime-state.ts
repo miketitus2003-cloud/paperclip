@@ -52,7 +52,7 @@ async function readState(db: Db, pluginId: string, companyId: string, agentId: s
   });
   if (admission) {
     await assertNativeTaskAdmissionCurrent(db, admission);
-    if (state) return { ...state, revision: admission.runtimeRevision, agent: { ...state.agent,
+    if (state) return { ...state, agent: { ...state.agent,
       status: admission.agentStatus as PluginAgentRuntimeIdentity["agent"]["status"],
       lifecycleState: "ready", lifecycleVersion: admission.lifecycleVersion } };
   }
@@ -61,7 +61,8 @@ async function readState(db: Db, pluginId: string, companyId: string, agentId: s
 
 
 export async function pluginAgentRuntimeIdentity(db: Db, pluginId: string, companyId: string, agentId: string, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeIdentity | null> {
-  return readState(db, pluginId, companyId, agentId, true, admission);
+  const state = await readState(db, pluginId, companyId, agentId, true, admission);
+  return state && admission ? { ...state, revision: admission.runtimeRevision } : state;
 }
 
 export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string, environmentId?: string, installEnvironmentSkills = false, admission?: NativeTaskAdmission): Promise<PluginAgentRuntimeState | null> {
@@ -93,7 +94,7 @@ export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyI
     const entryContent = fallback?.files[entryFile];
     const current = await readState(db, pluginId, companyId, agentId, false, admission);
     if (!current) return null;
-    if (current.revision === state.revision) return { ...current, instructionsEntryFile: entryFile, ...(entryContent === undefined ? {} : { instructionsEntryContent: entryContent }), skills, connectionAssignments, ...(shadowedSkills?.length ? { shadowedSkills } : {}) };
+    if (current.revision === state.revision) return { ...current, ...(admission ? { revision: admission.runtimeRevision } : {}), instructionsEntryFile: entryFile, ...(entryContent === undefined ? {} : { instructionsEntryContent: entryContent }), skills, connectionAssignments, ...(shadowedSkills?.length ? { shadowedSkills } : {}) };
   }
   throw conflict("Agent runtime changed while resolving synchronization inputs; retry");
 }

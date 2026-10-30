@@ -122,6 +122,12 @@ resource transaction can finish after its client disconnects. Operator plugin
 restart, upgrade, uninstall, and out-of-band VM administration remain explicit
 interruptions.
 
+A caller RPC timeout does not mean that its plugin worker has finished. Core
+retains the reservation until its original expiry when an admitted worker call
+is still unsettled during cleanup. A late worker continuation therefore cannot
+race a configuration change while it still has admission time. Normal startup
+releases the reservation after all worker calls have replied.
+
 `run.attach` can initialize a provider process before task inference starts.
 Core publishes the session and checks current run cancellation before it sends
 `turn.start`. A late startup handle is cancelled when Stop or the admission
