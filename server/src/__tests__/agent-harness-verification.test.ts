@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AdapterEnvironmentTestResult } from "@paperclipai/adapter-utils";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
-import { assertHarnessTestPassed } from "../services/agent-harness-verification.js";
+import { assertHarnessTestPassed } from "../services/agent-harness-test-result.js";
 
 describe("saved harness verification", () => {
   const result = (status: AdapterEnvironmentTestResult["status"], codes: string[]): AdapterEnvironmentTestResult => ({
@@ -42,6 +42,26 @@ describe("saved harness verification", () => {
     expect(() => assertHarnessTestPassed(result(status, [...codes]))).toThrow("The harness test failed");
   });
   it.each([
+    ["fail", "info", "openclaw_gateway_probe_ok"],
+    ["warn", "warn", "openclaw_gateway_probe_ok"],
+    ["warn", "info", "openclaw_gateway_probe_challenge_only"],
+    ["warn", "info", "openclaw_gateway_probe_failed"],
+    ["warn", "info", "openclaw_gateway_probe_error"],
+    ["warn", "info", "other_gateway_probe_ok"],
+  ] as const)("rejects gateway evidence %s/%s/%s", (status, level, code) => {
+    const probe = result(status, [code]);
+    probe.adapterType = "openclaw_gateway";
+    probe.checks[0].level = level;
+    expect(() => assertHarnessTestPassed(probe)).toThrow("The harness test failed");
+  });
+  it("preserves authentication failure despite a successful gateway probe", () => {
+    expect(() => assertHarnessTestPassed(result("warn", [
+      "openclaw_gateway_probe_ok", ADAPTER_AUTH_MISSING_CHECK_CODE,
+    ]))).toThrow(expect.objectContaining({ code: "harness_auth_failed" }));
+  });
+  it.each([
+    ["pass", ["openclaw_gateway_probe_ok"]],
+    ["warn", ["openclaw_gateway_probe_ok", "openclaw_gateway_plaintext_remote_ws"]],
     ["pass", ["process_command_available"]], ["warn", ["claude_hello_probe_passed", "optional_environment_warning"]],
     ["warn", ["claude_acp_anthropic_api_key_detected", "claude_hello_probe_passed"]],
     ["pass", ["codex_hello_probe_succeeded"]], ["warn", ["ai_connection_api_key_reverified"]],

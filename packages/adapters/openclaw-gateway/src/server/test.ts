@@ -6,6 +6,7 @@ import type {
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
+import { buildDeviceAuthPayloadV3, resolveDeviceIdentity, signDevicePayload, type GatewayDeviceIdentity } from "./device-auth.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -94,29 +95,29 @@ async function probeGateway(input: {
   url: string;
   headers: Record<string, string>;
   authToken: string | null;
+  password: string | null;
+  deviceToken: string | null;
+  deviceIdentity: GatewayDeviceIdentity | null;
+  clientId: string;
+  clientMode: string;
+  clientVersion: string;
+  deviceFamily: string | null;
   role: string;
   scopes: string[];
   timeoutMs: number;
 }): Promise<"ok" | "challenge_only" | "failed"> {
   return await new Promise((resolve) => {
     const ws = new WebSocket(input.url, { headers: input.headers, maxPayload: 2 * 1024 * 1024 });
-    const timeout = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolve("failed");
-    }, input.timeoutMs);
-
     let completed = false;
+    let connectId: string | null = null;
+    const timeout = setTimeout(() => finish("failed"), input.timeoutMs);
 
     const finish = (status: "ok" | "challenge_only" | "failed") => {
       if (completed) return;
       completed = true;
       clearTimeout(timeout);
       try {
-        ws.close();
+        ws.terminate();
       } catch {
         // ignore
       }
@@ -138,7 +139,22 @@ async function probeGateway(input: {
           return;
         }
 
-        const connectId = randomUUID();
+        if (connectId) return;
+        connectId = randomUUID();
+        const signedAtMs = Date.now();
+        const device = input.deviceIdentity;
+        const devicePayload = device ? buildDeviceAuthPayloadV3({
+          deviceId: device.deviceId,
+          clientId: input.clientId,
+          clientMode: input.clientMode,
+          role: input.role,
+          scopes: input.scopes,
+          signedAtMs,
+          token: input.authToken,
+          nonce,
+          platform: process.platform,
+          deviceFamily: input.deviceFamily,
+        }) : null;
         ws.send(
           JSON.stringify({
             type: "req",
@@ -148,17 +164,29 @@ async function probeGateway(input: {
               minProtocol: 4,
               maxProtocol: 4,
               client: {
-                id: "gateway-client",
-                version: "paperclip-probe",
+                id: input.clientId,
+                version: input.clientVersion,
                 platform: process.platform,
-                mode: "probe",
+                mode: input.clientMode,
+                ...(input.deviceFamily ? { deviceFamily: input.deviceFamily } : {}),
               },
               role: input.role,
               scopes: input.scopes,
-              ...(input.authToken
+              ...(device && devicePayload ? {
+                device: {
+                  id: device.deviceId,
+                  publicKey: device.publicKeyRawBase64Url,
+                  signature: signDevicePayload(device.privateKeyPem, devicePayload),
+                  signedAt: signedAtMs,
+                  nonce,
+                },
+              } : {}),
+              ...(input.authToken || input.password || input.deviceToken
                 ? {
                     auth: {
-                      token: input.authToken,
+                      ...(input.authToken ? { token: input.authToken } : {}),
+                      ...(input.password ? { password: input.password } : {}),
+                      ...(input.deviceToken ? { deviceToken: input.deviceToken } : {}),
                     },
                   }
                 : {}),
@@ -168,7 +196,7 @@ async function probeGateway(input: {
         return;
       }
 
-      if (event?.type === "res") {
+      if (event?.type === "res" && connectId && event.id === connectId && typeof event.ok === "boolean") {
         if (event.ok === true) {
           finish("ok");
         } else {
@@ -248,11 +276,15 @@ export async function testEnvironment(
 
   const headers = toStringRecord(config.headers);
   const authToken = resolveAuthToken(config, headers);
+  if (authToken && !Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) {
+    headers.authorization = /^bearer\s+/i.test(authToken) ? authToken : `Bearer ${authToken}`;
+  }
   const password = nonEmpty(config.password);
+  const deviceToken = nonEmpty(config.deviceToken);
   const role = nonEmpty(config.role) ?? "operator";
   const scopes = toStringArray(config.scopes);
 
-  if (authToken || password) {
+  if (authToken || password || deviceToken) {
     checks.push({
       code: "openclaw_gateway_auth_present",
       level: "info",
@@ -269,10 +301,21 @@ export async function testEnvironment(
 
   if (url && (url.protocol === "ws:" || url.protocol === "wss:")) {
     try {
+      // The probe signs with the execution identity but never approves pairing or starts an agent.
+      const disableDeviceAuth = config.disableDeviceAuth === true ||
+        (typeof config.disableDeviceAuth === "string" && ["true", "1"].includes(config.disableDeviceAuth.trim().toLowerCase()));
+      const deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(config);
       const probeResult = await probeGateway({
         url: url.toString(),
         headers,
         authToken,
+        password,
+        deviceToken,
+        deviceIdentity,
+        clientId: nonEmpty(config.clientId) ?? "gateway-client",
+        clientMode: nonEmpty(config.clientMode) ?? "backend",
+        clientVersion: nonEmpty(config.clientVersion) ?? "paperclip",
+        deviceFamily: nonEmpty(config.deviceFamily),
         role,
         scopes: scopes.length > 0 ? scopes : ["operator.admin"],
         timeoutMs: 3_000,
@@ -299,11 +342,11 @@ export async function testEnvironment(
           hint: "Verify network reachability and gateway URL from the Paperclip server host.",
         });
       }
-    } catch (err) {
+    } catch {
       checks.push({
         code: "openclaw_gateway_probe_error",
         level: "warn",
-        message: err instanceof Error ? err.message : "Gateway probe failed",
+        message: "Gateway probe failed. Check gateway URL and device signing configuration.",
       });
     }
   }

@@ -19,6 +19,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
+import { buildDeviceAuthPayloadV3, resolveDeviceIdentity, signDevicePayload, type GatewayDeviceIdentity } from "./device-auth.js";
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
 
@@ -35,12 +36,6 @@ type WakePayload = {
   issueIds: string[];
 };
 
-type GatewayDeviceIdentity = {
-  deviceId: string;
-  publicKeyRawBase64Url: string;
-  privateKeyPem: string;
-  source: "configured" | "ephemeral";
-};
 
 type GatewayRequestFrame = {
   type: "req";
@@ -101,7 +96,6 @@ const DEFAULT_ROLE = "operator";
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
 
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -553,86 +547,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
         reject(err);
       });
   });
-}
-
-function derivePublicKeyRaw(publicKeyPem: string): Buffer {
-  const key = crypto.createPublicKey(publicKeyPem);
-  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
-  if (
-    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
-    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
-  ) {
-    return spki.subarray(ED25519_SPKI_PREFIX.length);
-  }
-  return spki;
-}
-
-function base64UrlEncode(buf: Buffer): string {
-  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
-}
-
-function signDevicePayload(privateKeyPem: string, payload: string): string {
-  const key = crypto.createPrivateKey(privateKeyPem);
-  const sig = crypto.sign(null, Buffer.from(payload, "utf8"), key);
-  return base64UrlEncode(sig);
-}
-
-function buildDeviceAuthPayloadV3(params: {
-  deviceId: string;
-  clientId: string;
-  clientMode: string;
-  role: string;
-  scopes: string[];
-  signedAtMs: number;
-  token?: string | null;
-  nonce: string;
-  platform?: string | null;
-  deviceFamily?: string | null;
-}): string {
-  const scopes = params.scopes.join(",");
-  const token = params.token ?? "";
-  const platform = params.platform?.trim() ?? "";
-  const deviceFamily = params.deviceFamily?.trim() ?? "";
-  return [
-    "v3",
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
-    scopes,
-    String(params.signedAtMs),
-    token,
-    params.nonce,
-    platform,
-    deviceFamily,
-  ].join("|");
-}
-
-function resolveDeviceIdentity(config: Record<string, unknown>): GatewayDeviceIdentity {
-  const configuredPrivateKey = nonEmpty(config.devicePrivateKeyPem);
-  if (configuredPrivateKey) {
-    const privateKey = crypto.createPrivateKey(configuredPrivateKey);
-    const publicKey = crypto.createPublicKey(privateKey);
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-    const raw = derivePublicKeyRaw(publicKeyPem);
-    return {
-      deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-      publicKeyRawBase64Url: base64UrlEncode(raw),
-      privateKeyPem: configuredPrivateKey,
-      source: "configured",
-    };
-  }
-
-  const generated = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = generated.publicKey.export({ type: "spki", format: "pem" }).toString();
-  const privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const raw = derivePublicKeyRaw(publicKeyPem);
-  return {
-    deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-    publicKeyRawBase64Url: base64UrlEncode(raw),
-    privateKeyPem,
-    source: "ephemeral",
-  };
 }
 
 function isResponseFrame(value: unknown): value is GatewayResponseFrame {
