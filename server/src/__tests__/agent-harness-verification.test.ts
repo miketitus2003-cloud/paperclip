@@ -4,8 +4,8 @@ import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import { assertHarnessTestPassed } from "../services/agent-harness-test-result.js";
 
 describe("saved harness verification", () => {
-  const result = (status: AdapterEnvironmentTestResult["status"], codes: string[]): AdapterEnvironmentTestResult => ({
-    adapterType: "test", status, testedAt: new Date().toISOString(),
+  const result = (status: AdapterEnvironmentTestResult["status"], codes: string[], adapterType = "test"): AdapterEnvironmentTestResult => ({
+    adapterType, status, testedAt: new Date().toISOString(),
     checks: codes.map(code => ({ code, level: "info", message: code })),
   });
   it.each([
@@ -57,11 +57,23 @@ describe("saved harness verification", () => {
   it("preserves authentication failure despite a successful gateway probe", () => {
     expect(() => assertHarnessTestPassed(result("warn", [
       "openclaw_gateway_probe_ok", ADAPTER_AUTH_MISSING_CHECK_CODE,
-    ]))).toThrow(expect.objectContaining({ code: "harness_auth_failed" }));
+    ], "openclaw_gateway"))).toThrow(expect.objectContaining({ code: "harness_auth_failed" }));
+  });
+  it.each(["claude_local", "process"])("rejects Gateway success evidence from %s", (adapterType) => {
+    for (const warning of ["optional_environment_warning", "claude_hello_probe_timed_out"]) {
+      const probe = result("warn", ["openclaw_gateway_probe_ok"], adapterType);
+      probe.checks.push({ code: warning, level: "warn", message: warning });
+      expect(() => assertHarnessTestPassed(probe)).toThrow("The harness test failed");
+    }
+  });
+  it.each(["pass", "warn"] as const)("accepts %s Gateway evidence only for the Gateway adapter", (status) => {
+    const probe = result(status, ["openclaw_gateway_probe_ok"], "openclaw_gateway");
+    if (status === "warn") {
+      probe.checks.push({ code: "optional_environment_warning", level: "warn", message: "optional warning" });
+    }
+    expect(() => assertHarnessTestPassed(probe)).not.toThrow();
   });
   it.each([
-    ["pass", ["openclaw_gateway_probe_ok"]],
-    ["warn", ["openclaw_gateway_probe_ok", "openclaw_gateway_plaintext_remote_ws"]],
     ["pass", ["process_command_available"]], ["warn", ["claude_hello_probe_passed", "optional_environment_warning"]],
     ["warn", ["claude_acp_anthropic_api_key_detected", "claude_hello_probe_passed"]],
     ["pass", ["codex_hello_probe_succeeded"]], ["warn", ["ai_connection_api_key_reverified"]],

@@ -41,12 +41,15 @@ The environment test sends only `connect`. It uses the configured token, passwor
 device token, client fields, role, scopes, and signed device identity. Device signing
 is enabled by default, as it is for execution. A configured `devicePrivateKeyPem`
 reuses the execution identity; otherwise each test generates an ephemeral key.
+Configured signing keys must be Ed25519. Unsupported keys and signing/send errors
+return a sanitized probe failure.
 
 The test does not approve device pairing or run an agent. A gateway that requires
 pairing must accept the configured identity before the test can succeed. A rejected
 connect remains a warning and does not supply successful lifecycle verification.
 An accepted connect supplies `openclaw_gateway_probe_ok`; lifecycle verification
-recognizes that result even when an unrelated environment warning remains.
+recognizes that result only for the `openclaw_gateway` adapter, even when an
+unrelated environment warning remains.
 This proves the connect handshake, not task execution or a full request/receipt loop.
 
 ## Session Strategy

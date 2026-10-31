@@ -2,8 +2,12 @@ import type { AdapterEnvironmentTestResult } from "@paperclipai/adapter-utils";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 
 export function assertHarnessTestPassed(result: AdapterEnvironmentTestResult) {
-  const verified = result.checks.some(check => check.level === "info" &&
-    (/hello_probe_(passed|succeeded)$/.test(check.code) || check.code === "ai_connection_api_key_reverified" || check.code === "copilot_metadata_verified" || check.code === "openclaw_gateway_probe_ok"));
+  const verified = result.checks.some(check => check.level === "info" && (
+    /hello_probe_(passed|succeeded)$/.test(check.code)
+    || check.code === "ai_connection_api_key_reverified"
+    || check.code === "copilot_metadata_verified"
+    || (result.adapterType === "openclaw_gateway" && check.code === "openclaw_gateway_probe_ok")
+  ));
   const authenticationFailed = result.checks.some(check =>
     check.code === ADAPTER_AUTH_MISSING_CHECK_CODE || check.code === "COPILOT_AUTH_REQUIRED" || /_hello_probe_auth_required$/.test(check.code));
   const incomplete = !verified && (result.status === "warn" || result.checks.some(check => check.code.includes("hello_probe")));

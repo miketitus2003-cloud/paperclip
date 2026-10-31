@@ -106,13 +106,13 @@ async function probeGateway(input: {
   scopes: string[];
   timeoutMs: number;
 }): Promise<"ok" | "challenge_only" | "failed"> {
-  return await new Promise((resolve) => {
+  return await new Promise((resolve, reject) => {
     const ws = new WebSocket(input.url, { headers: input.headers, maxPayload: 2 * 1024 * 1024 });
     let completed = false;
     let connectId: string | null = null;
     const timeout = setTimeout(() => finish("failed"), input.timeoutMs);
 
-    const finish = (status: "ok" | "challenge_only" | "failed") => {
+    const finish = (status: "ok" | "challenge_only" | "failed" | "error") => {
       if (completed) return;
       completed = true;
       clearTimeout(timeout);
@@ -121,7 +121,8 @@ async function probeGateway(input: {
       } catch {
         // ignore
       }
-      resolve(status);
+      if (status === "error") reject(new Error("Gateway probe failed"));
+      else resolve(status);
     };
 
     ws.on("message", (raw) => {
@@ -141,58 +142,62 @@ async function probeGateway(input: {
 
         if (connectId) return;
         connectId = randomUUID();
-        const signedAtMs = Date.now();
-        const device = input.deviceIdentity;
-        const devicePayload = device ? buildDeviceAuthPayloadV3({
-          deviceId: device.deviceId,
-          clientId: input.clientId,
-          clientMode: input.clientMode,
-          role: input.role,
-          scopes: input.scopes,
-          signedAtMs,
-          token: input.authToken,
-          nonce,
-          platform: process.platform,
-          deviceFamily: input.deviceFamily,
-        }) : null;
-        ws.send(
-          JSON.stringify({
-            type: "req",
-            id: connectId,
-            method: "connect",
-            params: {
-              minProtocol: 4,
-              maxProtocol: 4,
-              client: {
-                id: input.clientId,
-                version: input.clientVersion,
-                platform: process.platform,
-                mode: input.clientMode,
-                ...(input.deviceFamily ? { deviceFamily: input.deviceFamily } : {}),
-              },
-              role: input.role,
-              scopes: input.scopes,
-              ...(device && devicePayload ? {
-                device: {
-                  id: device.deviceId,
-                  publicKey: device.publicKeyRawBase64Url,
-                  signature: signDevicePayload(device.privateKeyPem, devicePayload),
-                  signedAt: signedAtMs,
-                  nonce,
+        try {
+          const signedAtMs = Date.now();
+          const device = input.deviceIdentity;
+          const devicePayload = device ? buildDeviceAuthPayloadV3({
+            deviceId: device.deviceId,
+            clientId: input.clientId,
+            clientMode: input.clientMode,
+            role: input.role,
+            scopes: input.scopes,
+            signedAtMs,
+            token: input.authToken,
+            nonce,
+            platform: process.platform,
+            deviceFamily: input.deviceFamily,
+          }) : null;
+          ws.send(
+            JSON.stringify({
+              type: "req",
+              id: connectId,
+              method: "connect",
+              params: {
+                minProtocol: 4,
+                maxProtocol: 4,
+                client: {
+                  id: input.clientId,
+                  version: input.clientVersion,
+                  platform: process.platform,
+                  mode: input.clientMode,
+                  ...(input.deviceFamily ? { deviceFamily: input.deviceFamily } : {}),
                 },
-              } : {}),
-              ...(input.authToken || input.password || input.deviceToken
-                ? {
-                    auth: {
-                      ...(input.authToken ? { token: input.authToken } : {}),
-                      ...(input.password ? { password: input.password } : {}),
-                      ...(input.deviceToken ? { deviceToken: input.deviceToken } : {}),
-                    },
-                  }
-                : {}),
-            },
-          }),
-        );
+                role: input.role,
+                scopes: input.scopes,
+                ...(device && devicePayload ? {
+                  device: {
+                    id: device.deviceId,
+                    publicKey: device.publicKeyRawBase64Url,
+                    signature: signDevicePayload(device.privateKeyPem, devicePayload),
+                    signedAt: signedAtMs,
+                    nonce,
+                  },
+                } : {}),
+                ...(input.authToken || input.password || input.deviceToken
+                  ? {
+                      auth: {
+                        ...(input.authToken ? { token: input.authToken } : {}),
+                        ...(input.password ? { password: input.password } : {}),
+                        ...(input.deviceToken ? { deviceToken: input.deviceToken } : {}),
+                      },
+                    }
+                  : {}),
+              },
+            }),
+          );
+        } catch {
+          finish("error");
+        }
         return;
       }
 

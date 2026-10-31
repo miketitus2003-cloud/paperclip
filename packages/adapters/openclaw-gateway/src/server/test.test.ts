@@ -1,8 +1,8 @@
-import { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
+import crypto, { createHash, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { describe, expect, it } from "vitest";
-import { WebSocketServer } from "ws";
+import { describe, expect, it, vi } from "vitest";
+import { WebSocket, WebSocketServer } from "ws";
 import { testEnvironment } from "./test.js";
 
 // Only synthetic credentials and fresh, disposable keys are used here.
@@ -148,6 +148,61 @@ describe("OpenClaw Gateway connect probe", () => {
     const { result, requests } = await probe({ authToken: "fixture-token" }, undefined, null);
     expect(result.checks.some((check) => check.code === "openclaw_gateway_probe_ok")).toBe(false);
     expect(requests).toEqual([]);
+  });
+
+  it("contains an unsupported X25519 key without an uncaught exception", async () => {
+    const { privateKey } = generateKeyPairSync("x25519");
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error) => { uncaught.push(error); };
+    // Monitor without swallowing exceptions: an escaped callback error must fail the worker.
+    process.on("uncaughtExceptionMonitor", onUncaught);
+    try {
+      const { result, requests } = await probe({ authToken: "fixture-token", devicePrivateKeyPem: privateKeyPem });
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "openclaw_gateway_probe_error", level: "warn" }));
+      expect(result.checks.some((check) => check.code === "openclaw_gateway_probe_ok")).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(privateKeyPem);
+      expect(requests).toEqual([]);
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtExceptionMonitor", onUncaught);
+    }
+  });
+
+  it("contains callback signing failures and sanitizes their diagnostics", async () => {
+    const sign = vi.spyOn(crypto, "sign").mockImplementationOnce(() => {
+      throw new Error("sensitive-fixture-signing-diagnostic");
+    });
+    try {
+      const { result, requests } = await probe({ authToken: "fixture-token" });
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "openclaw_gateway_probe_error", level: "warn" }));
+      expect(result.checks.some((check) => check.code === "openclaw_gateway_probe_ok")).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("sensitive-fixture-signing-diagnostic");
+      expect(requests).toEqual([]);
+    } finally {
+      sign.mockRestore();
+    }
+  });
+
+  it("contains callback WebSocket send failures and sanitizes their diagnostics", async () => {
+    const originalSend = WebSocket.prototype.send;
+    const send = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (
+      this: WebSocket, ...args: Parameters<WebSocket["send"]>
+    ) {
+      if (typeof args[0] === "string" && JSON.parse(args[0]).method === "connect") {
+        throw new Error("sensitive-fixture-send-diagnostic");
+      }
+      Reflect.apply(originalSend, this, args);
+    });
+    try {
+      const { result, requests } = await probe({ authToken: "fixture-token" });
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "openclaw_gateway_probe_error", level: "warn" }));
+      expect(result.checks.some((check) => check.code === "openclaw_gateway_probe_ok")).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("sensitive-fixture-send-diagnostic");
+      expect(requests).toEqual([]);
+    } finally {
+      send.mockRestore();
+    }
   });
 
   it("reports an invalid device key without leaking its value or connecting", async () => {

@@ -70,6 +70,9 @@ export function resolveDeviceIdentity(config: Record<string, unknown>): GatewayD
   const configuredPrivateKey = nonEmpty(config.devicePrivateKeyPem);
   if (configuredPrivateKey) {
     const privateKey = crypto.createPrivateKey(configuredPrivateKey);
+    if (privateKey.asymmetricKeyType !== "ed25519") {
+      throw new Error("Gateway device authentication requires an Ed25519 private key.");
+    }
     const publicKey = crypto.createPublicKey(privateKey);
     const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
     const raw = derivePublicKeyRaw(publicKeyPem);
