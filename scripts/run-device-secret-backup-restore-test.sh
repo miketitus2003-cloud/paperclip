@@ -92,6 +92,9 @@ clean_env() {
     TMPDIR="$SCRATCH/tmp" \
     XDG_CACHE_HOME="$SCRATCH/cache" \
     PAPERCLIP_HOME="$SCRATCH/paperclip-home" \
+    NODE24="$NODE24" \
+    PNPM_CLI="$PNPM_CLI" \
+    PNPM_STORE="$PNPM_STORE" \
     CI=1 \
     GIT_TERMINAL_PROMPT=0 \
     "$@"
