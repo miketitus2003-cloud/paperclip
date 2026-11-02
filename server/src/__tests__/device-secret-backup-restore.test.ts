@@ -42,6 +42,19 @@ function expectSameDeviceIdentity(expectedPrivateKeyPem: string, restoredPrivate
   expect(verify(null, message, createPublicKey(createPrivateKey(expectedPrivateKeyPem)), signature)).toBe(true);
 }
 
+async function runCleanup(actions: Array<() => Promise<unknown> | unknown>, label: string) {
+  const failures: unknown[] = [];
+  for (const action of actions) {
+    try {
+      await action();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, `${label} cleanup failed`);
+}
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -66,11 +79,15 @@ describeEmbeddedPostgres("synthetic encrypted device secret backup and restore",
   }, 20_000);
 
   afterAll(async () => {
-    await db?.$client.end({ timeout: 1 });
-    await stopDb?.();
-    if (previousKeyFile === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
-    else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKeyFile;
-    rmSync(secretStoreDir, { recursive: true, force: true });
+    await runCleanup([
+      () => db?.$client.end({ timeout: 1 }),
+      () => stopDb?.(),
+      () => {
+        if (previousKeyFile === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+        else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKeyFile;
+      },
+      () => rmSync(secretStoreDir, { recursive: true, force: true }),
+    ], "synthetic secret database");
   });
 
   it("restores encrypted secret metadata and resolves the same synthetic Ed25519 identity", async () => {
@@ -137,19 +154,12 @@ describeEmbeddedPostgres("synthetic encrypted device secret backup and restore",
       );
       expectSameDeviceIdentity(syntheticPrivateKeyPem, resolved.config.devicePrivateKeyPem);
     } finally {
-      try {
-        await restoredDb?.$client.end({ timeout: 1 });
-      } finally {
-        try {
-          await adminDb.$client.unsafe(`DROP DATABASE IF EXISTS "${targetName}" WITH (FORCE)`);
-        } finally {
-          try {
-            await adminDb.$client.end({ timeout: 1 });
-          } finally {
-            rmSync(backupDir, { recursive: true, force: true });
-          }
-        }
-      }
+      await runCleanup([
+        () => restoredDb?.$client.end({ timeout: 1 }),
+        () => adminDb.$client.unsafe(`DROP DATABASE IF EXISTS "${targetName}" WITH (FORCE)`),
+        () => adminDb.$client.end({ timeout: 1 }),
+        () => rmSync(backupDir, { recursive: true, force: true }),
+      ], "synthetic backup/restore target");
     }
   }, 90_000);
 });
