@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { assertHarnessTestPassed } from "../services/agent-harness-test-result.js";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { execute, testEnvironment } from "@paperclipai/adapter-openclaw-gateway/server";
@@ -660,6 +661,24 @@ describe("openclaw gateway ui build config", () => {
 });
 
 describe("openclaw gateway testEnvironment", () => {
+  it("passes a real accepted connect result with an optional warning to lifecycle verification", async () => {
+    const gateway = await createMockGatewayServer();
+    try {
+      // The local fixture accepts signed device auth without a shared token.
+      const result = await testEnvironment({
+        companyId: "company-123",
+        adapterType: "openclaw_gateway",
+        config: { url: gateway.url },
+      });
+      expect(result.status).toBe("warn");
+      expect(result.checks.some((check) => check.code === "openclaw_gateway_probe_ok")).toBe(true);
+      expect(() => assertHarnessTestPassed(result)).not.toThrow();
+      expect(gateway.getAgentPayload()).toBeNull();
+    } finally {
+      await gateway.close();
+    }
+  });
+
   it("reports missing url as failure", async () => {
     const result = await testEnvironment({
       companyId: "company-123",

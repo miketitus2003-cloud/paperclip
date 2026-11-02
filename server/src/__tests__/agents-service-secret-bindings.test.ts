@@ -1,9 +1,17 @@
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
-import { randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  verify,
+} from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
   activityLog,
@@ -22,6 +30,65 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { agentService } from "../services/agents.ts";
 import { secretService } from "../services/secrets.js";
+
+const openclawSocketState = vi.hoisted(() => ({ connectParams: null as Record<string, unknown> | null }));
+
+function ed25519PublicKeyFingerprint(privateKeyPem: string): string {
+  const publicKeyDer = createPublicKey(createPrivateKey(privateKeyPem)).export({ type: "spki", format: "der" });
+  return createHash("sha256").update(publicKeyDer).digest("hex");
+}
+
+function expectSameEd25519Identity(expectedPrivateKeyPem: string, resolvedValue: unknown) {
+  expect(typeof resolvedValue).toBe("string");
+  const resolvedPrivateKeyPem = resolvedValue as string;
+  expect(ed25519PublicKeyFingerprint(resolvedPrivateKeyPem)).toBe(
+    ed25519PublicKeyFingerprint(expectedPrivateKeyPem),
+  );
+
+  const message = Buffer.from("synthetic Paperclip OpenClaw device identity check");
+  const signature = sign(null, message, createPrivateKey(resolvedPrivateKeyPem));
+  expect(verify(null, message, createPublicKey(createPrivateKey(expectedPrivateKeyPem)), signature)).toBe(true);
+}
+
+vi.mock("ws", async () => {
+  const { EventEmitter } = await import("node:events");
+  class TestGatewaySocket extends EventEmitter {
+    static readonly OPEN = 1;
+    readonly readyState = TestGatewaySocket.OPEN;
+
+    constructor() {
+      super();
+      queueMicrotask(() => {
+        this.emit("open");
+        this.emit("message", JSON.stringify({
+          type: "event",
+          event: "connect.challenge",
+          payload: { nonce: "synthetic-device-auth-nonce" },
+        }));
+      });
+    }
+
+    send(serialized: string) {
+      const request = JSON.parse(serialized) as { id: string; method: string; params?: Record<string, unknown> };
+      if (request.method === "connect") openclawSocketState.connectParams = request.params ?? null;
+      const payload = request.method === "connect"
+        ? { protocol: 3 }
+        : { status: "ok", runId: "synthetic-gateway-run", result: { text: "synthetic completion" } };
+      queueMicrotask(() => this.emit("message", JSON.stringify({
+        type: "res",
+        id: request.id,
+        ok: true,
+        payload,
+      })));
+    }
+
+    close() {}
+  }
+  return { WebSocket: TestGatewaySocket };
+});
+
+import { execute as executeOpenclawGateway } from "../../../packages/adapters/openclaw-gateway/src/server/execute.js";
+import { redactAgentAdapterConfig, redactSensitiveText } from "../redaction.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -274,6 +341,80 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     );
     expect(resolved.config.apiKey).toBe(literalApiKey);
     expect(JSON.stringify(persistedConfig)).not.toContain(literalApiKey);
+  });
+
+  it("resolves an OpenClaw device secret for signing without disclosing it", async () => {
+    const companyId = await seedCompany();
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const syntheticPrivatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const persisted = await createAgentLifecycle(db).requestHire(companyId, {
+      name: "OpenClaw Secret Key Test",
+      role: "engineer",
+      status: "idle",
+      adapterType: "openclaw_gateway",
+      adapterConfig: {
+        url: "ws://gateway.invalid:18791",
+        devicePrivateKeyPem: syntheticPrivatePem,
+      },
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    const storedRows = await db.select().from(agents).where(eq(agents.id, persisted.id));
+    const storedConfig = storedRows[0]?.adapterConfig as Record<string, unknown>;
+    expect(JSON.stringify(storedConfig)).not.toContain(syntheticPrivatePem);
+    expect(storedConfig.devicePrivateKeyPem).toMatchObject({ type: "secret_ref", version: "latest" });
+
+    const secretRef = storedConfig.devicePrivateKeyPem as { secretId: string };
+    const resolved = await secretService(db).resolveAdapterConfigForRuntime(
+      companyId,
+      storedConfig,
+      { consumerType: "agent", consumerId: persisted.id },
+      { adapterType: "openclaw_gateway" },
+    );
+    expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
+    expect(secretRef.secretId).toBeTruthy();
+
+    const configRead = redactAgentAdapterConfig(storedConfig);
+    const revisionBefore = redactAgentAdapterConfig({ devicePrivateKeyPem: syntheticPrivatePem });
+    const revisionAfter = redactAgentAdapterConfig(storedConfig);
+    const diagnostics = redactSensitiveText(`Gateway diagnostic: ${syntheticPrivatePem}`);
+    for (const output of [JSON.stringify(configRead), JSON.stringify(revisionBefore), JSON.stringify(revisionAfter), diagnostics]) {
+      expect(output).not.toContain(syntheticPrivatePem);
+    }
+
+    openclawSocketState.connectParams = null;
+    const logLines: string[] = [];
+    const execution = await executeOpenclawGateway({
+      runId: "synthetic-paperclip-run",
+      agent: {
+        id: persisted.id,
+        companyId,
+        name: "OpenClaw Secret Key Test",
+        adapterType: "openclaw_gateway",
+        adapterConfig: storedConfig,
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { ...resolved.config, timeoutSec: 1 },
+      context: { issueId: "synthetic-issue", taskId: "synthetic-issue", wakeReason: "interaction_resolved" },
+      onLog: async (_stream: string, line: string) => { logLines.push(line); },
+    } as any);
+
+    expect(execution.exitCode).toBe(0);
+    expect(openclawSocketState.connectParams).toBeTruthy();
+    const connectParams = openclawSocketState.connectParams!;
+    const device = connectParams.device as { id: string; publicKey: string; signature: string; signedAt: number; nonce: string };
+    const client = connectParams.client as { id: string; mode: string; platform: string; deviceFamily?: string };
+    const scopes = connectParams.scopes as string[];
+    const signedPayload = [
+      "v3", device.id, client.id, client.mode, connectParams.role, scopes.join(","),
+      String(device.signedAt), "", device.nonce, client.platform, client.deviceFamily ?? "",
+    ].join("|");
+    const rawPublicKey = (publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(12);
+    expect(device.publicKey).toBe(rawPublicKey.toString("base64url"));
+    expect(verify(null, Buffer.from(signedPayload, "utf8"), publicKey, Buffer.from(device.signature, "base64url"))).toBe(true);
+    expect(logLines.join("\n")).not.toContain(syntheticPrivatePem);
   });
 
   it("replaces agent secret bindings when adapterConfig env changes", async () => {

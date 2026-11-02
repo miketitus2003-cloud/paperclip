@@ -4,6 +4,7 @@ import {
   buildJoinDefaultsPayloadForAccept,
   canReplayOpenClawGatewayInviteAccept,
   mergeJoinDefaultsPayloadForReplay,
+  normalizeAgentDefaultsForJoin,
 } from "../routes/access.js";
 
 describe("assertLegacyAgentInviteAdapterType", () => {
@@ -99,5 +100,70 @@ describe("mergeJoinDefaultsPayloadForReplay", () => {
       "x-openclaw-token": "new-token-1234567890",
       "x-custom": "keep-me",
     });
+  });
+
+  it("preserves managed keys and unwraps legacy plain keys through accept preparation", () => {
+    const commonDefaults = {
+      url: "ws://gateway.example:18789",
+      headers: { "x-openclaw-token": "gateway-token-1234567890" },
+      disableDeviceAuth: false,
+    };
+    const secretRef = {
+      type: "secret_ref",
+      secretId: "c0a80100-0000-4000-8000-000000000001",
+      version: "latest",
+    };
+    const key = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-LEGACY-IDENTITY\n-----END PRIVATE KEY-----";
+
+    for (const [devicePrivateKeyPem, expected] of [
+      [secretRef, secretRef],
+      [{ type: "plain", value: key }, key],
+    ] as const) {
+      const merged = mergeJoinDefaultsPayloadForReplay(
+        { ...commonDefaults, devicePrivateKeyPem },
+        { url: "ws://gateway-updated.example:18789" },
+      );
+      const prepared = buildJoinDefaultsPayloadForAccept({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: merged,
+      });
+      const normalized = normalizeAgentDefaultsForJoin({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: prepared,
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      });
+      expect(normalized.fatalErrors).toEqual([]);
+      expect(normalized.normalized?.devicePrivateKeyPem).toEqual(expected);
+    }
+  });
+
+  it("rejects malformed device-key bindings instead of generating a replacement identity", () => {
+    const prepared = buildJoinDefaultsPayloadForAccept({
+      adapterType: "openclaw_gateway",
+      defaultsPayload: {
+        url: "ws://gateway.example:18789",
+        headers: { "x-openclaw-token": "gateway-token-1234567890" },
+        devicePrivateKeyPem: { type: "secret_ref", secretId: "not-a-uuid" },
+      },
+    });
+    const normalized = normalizeAgentDefaultsForJoin({
+      adapterType: "openclaw_gateway",
+      defaultsPayload: prepared,
+      deploymentMode: "authenticated",
+      deploymentExposure: "private",
+      bindHost: "127.0.0.1",
+      allowedHostnames: [],
+    });
+
+    expect(normalized.fatalErrors).toContain(
+      "agentDefaultsPayload.devicePrivateKeyPem must be a string, plain binding, or company secret reference",
+    );
+    expect(normalized.normalized?.devicePrivateKeyPem).toBeUndefined();
+    expect(normalized.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "openclaw_gateway_device_key_binding_invalid" }),
+    ]));
   });
 });

@@ -1,27 +1,72 @@
-import { randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  verify,
+} from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
+  agents,
   companies,
+  companySecretBindings,
   companySecretProviderConfigs,
   companySecretVersions,
   companySecrets,
   createDb,
   invites,
   joinRequests,
+  principalPermissionGrants,
 } from "@paperclipai/db";
+import { createAgentLifecycle } from "../services/agent-lifecycle.js";
+import { agentService } from "../services/agents.js";
+import { secretService } from "../services/secrets.js";
 import {
   buildJoinDefaultsPayloadForAccept,
+  mergeJoinDefaultsPayloadForReplay,
   normalizeAgentDefaultsForJoin,
   prepareAgentDefaultsPayloadForJoinPersistence,
+  toJoinRequestResponse,
 } from "../routes/access.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+function ed25519PublicKeyFingerprint(privateKeyPem: string): string {
+  const publicKeyDer = createPublicKey(createPrivateKey(privateKeyPem)).export({ type: "spki", format: "der" });
+  return createHash("sha256").update(publicKeyDer).digest("hex");
+}
+
+function expectSameEd25519Identity(expectedPrivateKeyPem: string, resolvedValue: unknown) {
+  expect(typeof resolvedValue).toBe("string");
+  const resolvedPrivateKeyPem = resolvedValue as string;
+  expect(ed25519PublicKeyFingerprint(resolvedPrivateKeyPem)).toBe(
+    ed25519PublicKeyFingerprint(expectedPrivateKeyPem),
+  );
+
+  const message = Buffer.from("synthetic Paperclip OpenClaw device identity check");
+  const signature = sign(null, message, createPrivateKey(resolvedPrivateKeyPem));
+  expect(verify(null, message, createPublicKey(createPrivateKey(expectedPrivateKeyPem)), signature)).toBe(true);
+}
+
+function expectSameSecretBindingIdentity(actualValue: unknown, expectedValue: unknown) {
+  expect(actualValue).toMatchObject({ type: "secret_ref" });
+  expect(expectedValue).toMatchObject({ type: "secret_ref" });
+  const actual = actualValue as Record<string, unknown>;
+  const expected = expectedValue as Record<string, unknown>;
+  expect(actual.secretId).toBe(expected.secretId);
+  expect(actual.version ?? "latest").toBe(expected.version ?? "latest");
+  expect(actual.projectionClass ?? "unclassified").toBe(expected.projectionClass ?? "unclassified");
+  expect(actual.projectionAllowlistKey ?? null).toBe(expected.projectionAllowlistKey ?? null);
+}
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -144,6 +189,54 @@ describe("normalizeAgentDefaultsForJoin (openclaw_gateway)", () => {
     expect(normalized.normalized?.disableDeviceAuth).toBe(true);
     expect(normalized.normalized?.devicePrivateKeyPem).toBeUndefined();
   });
+
+});
+
+describe("toJoinRequestResponse (OpenClaw legacy key safety)", () => {
+  it("redacts an inline device key from legacy join request records", () => {
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-LEGACY-JOIN-KEY\n-----END PRIVATE KEY-----";
+    const response = toJoinRequestResponse({
+      id: "join-request-synthetic",
+      claimSecretHash: "claim-hash-synthetic",
+      agentDefaultsPayload: {
+        url: "ws://gateway.invalid:18791",
+        devicePrivateKeyPem: syntheticPem,
+      },
+    } as any);
+
+    expect(JSON.stringify(response)).not.toContain(syntheticPem);
+    expect((response.agentDefaultsPayload as Record<string, unknown>).devicePrivateKeyPem)
+      .toBe("***REDACTED***");
+    expect(response).not.toHaveProperty("claimSecretHash");
+  });
+
+  it("redacts plain bindings and preserves managed secret references", () => {
+    const secretRef = { type: "secret_ref", secretId: "synthetic-secret-id", version: "latest" };
+    const response = toJoinRequestResponse({
+      id: "join-request-synthetic",
+      claimSecretHash: "claim-hash-synthetic",
+      agentDefaultsPayload: {
+        devicePrivateKeyPem: secretRef,
+        apiKey: { type: "secret_ref", secretId: "synthetic-hermes-secret-id", version: "latest" },
+      },
+    } as any);
+    expect((response.agentDefaultsPayload as Record<string, unknown>).devicePrivateKeyPem).toEqual(secretRef);
+    expect((response.agentDefaultsPayload as Record<string, unknown>).apiKey)
+      .toEqual({ type: "secret_ref", secretId: "synthetic-hermes-secret-id", version: "latest" });
+
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-PLAIN-BINDING\n-----END PRIVATE KEY-----";
+    const plainResponse = toJoinRequestResponse({
+      id: "join-request-synthetic-plain",
+      claimSecretHash: "claim-hash-synthetic",
+      agentDefaultsPayload: {
+        devicePrivateKeyPem: { type: "plain", value: syntheticPem },
+      },
+    } as any);
+    expect(JSON.stringify(plainResponse)).not.toContain(syntheticPem);
+    expect(plainResponse.agentDefaultsPayload).toMatchObject({
+      devicePrivateKeyPem: { type: "plain", value: "***REDACTED***" },
+    });
+  });
 });
 
 describe("normalizeAgentDefaultsForJoin (hermes_gateway)", () => {
@@ -252,7 +345,7 @@ describe("normalizeAgentDefaultsForJoin (hermes_gateway)", () => {
   });
 });
 
-describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (hermes_gateway)", () => {
+describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter schema secrets)", () => {
   let stopDb: (() => Promise<void>) | null = null;
   let db!: ReturnType<typeof createDb>;
   const previousKeyFile = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
@@ -269,6 +362,10 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (hermes_
   afterEach(async () => {
     await db.delete(joinRequests);
     await db.delete(invites);
+    await db.delete(activityLog);
+    await db.delete(principalPermissionGrants);
+    await db.delete(companySecretBindings);
+    await db.delete(agents);
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
     await db.delete(companySecretProviderConfigs);
@@ -359,4 +456,269 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (hermes_
     expect(storedSecrets).toHaveLength(1);
     expect((storedPayload.apiKey as { secretId: string }).secretId).toBe(storedSecrets[0]?.id);
   });
+
+  it("stores OpenClaw device keys as secret refs and resolves them through onboarding", async () => {
+    const companyId = randomUUID();
+    const inviteId = randomUUID();
+    const joinRequestId = randomUUID();
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const syntheticPrivatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(invites).values({
+      id: inviteId,
+      companyId,
+      inviteType: "company_join",
+      tokenHash: `invite-token-${randomUUID()}`,
+      allowedJoinTypes: "agent",
+      defaultsPayload: null,
+      expiresAt: new Date("2027-03-10T00:00:00.000Z"),
+    });
+
+    const normalized = normalizeAgentDefaultsForJoin({
+      adapterType: "openclaw_gateway",
+      defaultsPayload: {
+        url: "ws://gateway.invalid:18791",
+        headers: { "x-openclaw-token": "synthetic-gateway-token-1234567890" },
+        devicePrivateKeyPem: syntheticPrivatePem,
+      },
+      deploymentMode: "authenticated",
+      deploymentExposure: "private",
+      bindHost: "127.0.0.1",
+      allowedHostnames: [],
+    });
+    expect(normalized.fatalErrors).toEqual([]);
+
+    const persistedDefaults = await prepareAgentDefaultsPayloadForJoinPersistence({
+      db,
+      companyId,
+      adapterType: "openclaw_gateway",
+      normalized: normalized.normalized,
+    });
+    expect(JSON.stringify(persistedDefaults)).not.toContain(syntheticPrivatePem);
+    expect(persistedDefaults?.devicePrivateKeyPem).toMatchObject({ type: "secret_ref", version: "latest" });
+
+    await db.insert(joinRequests).values({
+      id: joinRequestId,
+      inviteId,
+      companyId,
+      requestType: "agent",
+      status: "pending_approval",
+      requestIp: "127.0.0.1",
+      agentName: "OpenClaw Join Test",
+      adapterType: "openclaw_gateway",
+      capabilities: "Synthetic key onboarding test",
+      agentDefaultsPayload: persistedDefaults,
+      claimSecretHash: "synthetic-claim-hash",
+      claimSecretExpiresAt: new Date("2027-03-11T00:00:00.000Z"),
+    });
+
+    const storedJoinRequest = await db.select().from(joinRequests)
+      .where(eq(joinRequests.id, joinRequestId)).then((rows) => rows[0]);
+    expect(JSON.stringify(storedJoinRequest?.agentDefaultsPayload)).not.toContain(syntheticPrivatePem);
+    const serializedJoin = toJoinRequestResponse(storedJoinRequest!);
+    expect(JSON.stringify(serializedJoin)).not.toContain(syntheticPrivatePem);
+
+    const onboardedAgent = await createAgentLifecycle(db).requestHire(companyId, {
+      name: "OpenClaw Join Test",
+      role: "engineer",
+      status: "idle",
+      adapterType: "openclaw_gateway",
+      adapterConfig: storedJoinRequest?.agentDefaultsPayload as Record<string, unknown>,
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    const persistedAgent = await db.select().from(agents)
+      .where(eq(agents.id, onboardedAgent.id)).then((rows) => rows[0]);
+    expect(JSON.stringify(persistedAgent?.adapterConfig)).not.toContain(syntheticPrivatePem);
+
+    const resolved = await secretService(db).resolveAdapterConfigForRuntime(
+      companyId,
+      persistedAgent?.adapterConfig as Record<string, unknown>,
+      { consumerType: "agent", consumerId: onboardedAgent.id },
+      { adapterType: "openclaw_gateway" },
+    );
+    expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
+  });
+
+  it.each(["managed secret reference", "legacy plain binding"] as const)(
+    "preserves OpenClaw identity through repeated accept and approved agent update (%s)",
+    async bindingKind => {
+      const companyId = randomUUID();
+      const inviteId = randomUUID();
+      const joinRequestId = randomUUID();
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const syntheticPrivatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      const baseDefaults = {
+        url: "ws://gateway.invalid:18791",
+        headers: { "x-openclaw-token": "synthetic-gateway-token-1234567890" },
+        disableDeviceAuth: false,
+      };
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(invites).values({
+        id: inviteId,
+        companyId,
+        inviteType: "company_join",
+        tokenHash: `invite-token-${randomUUID()}`,
+        allowedJoinTypes: "agent",
+        defaultsPayload: null,
+        expiresAt: new Date("2027-03-10T00:00:00.000Z"),
+      });
+
+      // Provision one synthetic company secret so the managed-reference case
+      // exercises the same company-owned binding used by a real invite.
+      const seededSecretDefaults = await prepareAgentDefaultsPayloadForJoinPersistence({
+        db,
+        companyId,
+        adapterType: "openclaw_gateway",
+        normalized: { devicePrivateKeyPem: syntheticPrivatePem },
+      });
+      const managedReference = seededSecretDefaults?.devicePrivateKeyPem;
+      expect(managedReference).toMatchObject({ type: "secret_ref", version: "latest" });
+      const foreignCompanyId = randomUUID();
+      await db.insert(companies).values({
+        id: foreignCompanyId,
+        name: "Other company",
+        issuePrefix: `T${foreignCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await expect(prepareAgentDefaultsPayloadForJoinPersistence({
+        db,
+        companyId: foreignCompanyId,
+        adapterType: "openclaw_gateway",
+        normalized: { devicePrivateKeyPem: managedReference },
+      })).rejects.toThrow();
+
+      const initialDeviceKey = bindingKind === "managed secret reference"
+        ? managedReference
+        : { type: "plain", value: syntheticPrivatePem };
+      const mergedInitial = mergeJoinDefaultsPayloadForReplay(
+        null,
+        { ...baseDefaults, devicePrivateKeyPem: initialDeviceKey },
+      );
+      const preparedInitial = buildJoinDefaultsPayloadForAccept({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: mergedInitial,
+      });
+      const normalizedInitial = normalizeAgentDefaultsForJoin({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: preparedInitial,
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      });
+      expect(normalizedInitial.fatalErrors).toEqual([]);
+      const persistedInitial = await prepareAgentDefaultsPayloadForJoinPersistence({
+        db,
+        companyId,
+        adapterType: "openclaw_gateway",
+        normalized: normalizedInitial.normalized,
+      });
+      expect(persistedInitial?.devicePrivateKeyPem).toMatchObject({ type: "secret_ref" });
+      const initialBinding = persistedInitial?.devicePrivateKeyPem as Record<string, unknown>;
+      const [secretRecord] = await db.select({
+        companyId: companySecrets.companyId,
+        scope: companySecrets.scope,
+        provider: companySecrets.provider,
+        managedMode: companySecrets.managedMode,
+      }).from(companySecrets).where(eq(companySecrets.id, initialBinding.secretId as string));
+      expect(secretRecord).toMatchObject({
+        companyId,
+        scope: "company",
+        provider: "local_encrypted",
+        managedMode: "paperclip_managed",
+      });
+
+      const hiredAgent = await createAgentLifecycle(db).requestHire(companyId, {
+        name: `OpenClaw replay ${bindingKind}`,
+        role: "engineer",
+        status: "idle",
+        adapterType: "openclaw_gateway",
+        adapterConfig: persistedInitial as Record<string, unknown>,
+        runtimeConfig: {},
+        spentMonthlyCents: 0,
+        lastHeartbeatAt: null,
+      });
+      await db.insert(joinRequests).values({
+        id: joinRequestId,
+        inviteId,
+        companyId,
+        requestType: "agent",
+        status: "approved",
+        requestIp: "127.0.0.1",
+        agentName: hiredAgent.name,
+        adapterType: "openclaw_gateway",
+        capabilities: "Synthetic replay identity test",
+        agentDefaultsPayload: persistedInitial,
+        createdAgentId: hiredAgent.id,
+      });
+
+      // Simulate an accepted invite replay with updated non-key settings. The
+      // stored binding wins when the replay omits devicePrivateKeyPem.
+      const storedJoinRequest = await db.select().from(joinRequests)
+        .where(eq(joinRequests.id, joinRequestId)).then(rows => rows[0]!);
+      const mergedReplay = mergeJoinDefaultsPayloadForReplay(
+        storedJoinRequest.agentDefaultsPayload,
+        {
+          url: "ws://gateway-updated.invalid:18791",
+          headers: { "x-openclaw-token": "synthetic-gateway-token-1234567890" },
+        },
+      );
+      const preparedReplay = buildJoinDefaultsPayloadForAccept({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: mergedReplay,
+      });
+      const normalizedReplay = normalizeAgentDefaultsForJoin({
+        adapterType: "openclaw_gateway",
+        defaultsPayload: preparedReplay,
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      });
+      expect(normalizedReplay.fatalErrors).toEqual([]);
+      const persistedReplay = await prepareAgentDefaultsPayloadForJoinPersistence({
+        db,
+        companyId,
+        adapterType: "openclaw_gateway",
+        normalized: normalizedReplay.normalized,
+      });
+      expectSameSecretBindingIdentity(persistedReplay?.devicePrivateKeyPem, persistedInitial?.devicePrivateKeyPem);
+
+      await db.update(joinRequests).set({ agentDefaultsPayload: persistedReplay })
+        .where(eq(joinRequests.id, joinRequestId));
+      const existingAgent = await agentService(db).getById(hiredAgent.id);
+      expect(existingAgent).not.toBeNull();
+      const approvedReplayConfig = {
+        ...(existingAgent!.adapterConfig as Record<string, unknown>),
+        ...(normalizedReplay.normalized ?? {}),
+      };
+      const updatedAgent = await agentService(db).update(hiredAgent.id, {
+        adapterType: "openclaw_gateway",
+        adapterConfig: approvedReplayConfig,
+      });
+      expectSameSecretBindingIdentity(updatedAgent?.adapterConfig.devicePrivateKeyPem, persistedInitial?.devicePrivateKeyPem);
+
+      const resolved = await secretService(db).resolveAdapterConfigForRuntime(
+        companyId,
+        updatedAgent!.adapterConfig as Record<string, unknown>,
+        { consumerType: "agent", consumerId: hiredAgent.id },
+        { adapterType: "openclaw_gateway" },
+      );
+      expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
+    },
+  );
 });

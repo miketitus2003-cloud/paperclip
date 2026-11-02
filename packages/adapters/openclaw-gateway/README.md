@@ -22,6 +22,7 @@ Gateway credentials can be provided in any of these ways:
 - `headers.x-openclaw-token`
 - `headers.x-openclaw-auth` (legacy)
 - `password` (shared password mode)
+- `deviceToken` (device token mode)
 
 When a token is present and `authorization` header is missing, the adapter derives `Authorization: Bearer <token>`.
 
@@ -33,6 +34,23 @@ By default the adapter sends a signed `device` payload in `connect` params.
 - set `devicePrivateKeyPem` to pin a stable signing key
 - without `devicePrivateKeyPem`, the adapter generates an ephemeral Ed25519 keypair per run
 - when `autoPairOnFirstConnect` is enabled (default), the adapter handles one initial `pairing required` by calling `device.pair.list` + `device.pair.approve` over shared auth, then retries once.
+
+## Environment test
+
+The environment test sends only `connect`. It uses the configured token, password,
+device token, client fields, role, scopes, and signed device identity. Device signing
+is enabled by default, as it is for execution. A configured `devicePrivateKeyPem`
+reuses the execution identity; otherwise each test generates an ephemeral key.
+Configured signing keys must be Ed25519. Unsupported keys and signing/send errors
+return a sanitized probe failure.
+
+The test does not approve device pairing or run an agent. A gateway that requires
+pairing must accept the configured identity before the test can succeed. A rejected
+connect remains a warning and does not supply successful lifecycle verification.
+An accepted connect supplies `openclaw_gateway_probe_ok`; lifecycle verification
+recognizes that result only for the `openclaw_gateway` adapter, even when an
+unrelated environment warning remains.
+This proves the connect handshake, not task execution or a full request/receipt loop.
 
 ## Session Strategy
 
