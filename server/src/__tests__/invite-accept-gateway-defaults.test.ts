@@ -13,6 +13,7 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
   agents,
   companies,
   companySecretBindings,
@@ -361,6 +362,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
   afterEach(async () => {
     await db.delete(joinRequests);
     await db.delete(invites);
+    await db.delete(activityLog);
     await db.delete(principalPermissionGrants);
     await db.delete(companySecretBindings);
     await db.delete(agents);
