@@ -169,14 +169,32 @@ describe("toJoinRequestResponse (OpenClaw legacy key safety)", () => {
     expect(response).not.toHaveProperty("claimSecretHash");
   });
 
-  it("preserves secret references while redacting a legacy inline key", () => {
+  it("redacts plain bindings and preserves managed secret references", () => {
     const secretRef = { type: "secret_ref", secretId: "synthetic-secret-id", version: "latest" };
     const response = toJoinRequestResponse({
       id: "join-request-synthetic",
       claimSecretHash: "claim-hash-synthetic",
-      agentDefaultsPayload: { devicePrivateKeyPem: secretRef },
+      agentDefaultsPayload: {
+        devicePrivateKeyPem: secretRef,
+        apiKey: { type: "secret_ref", secretId: "synthetic-hermes-secret-id", version: "latest" },
+      },
     } as any);
     expect((response.agentDefaultsPayload as Record<string, unknown>).devicePrivateKeyPem).toEqual(secretRef);
+    expect((response.agentDefaultsPayload as Record<string, unknown>).apiKey)
+      .toEqual({ type: "secret_ref", secretId: "synthetic-hermes-secret-id", version: "latest" });
+
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-PLAIN-BINDING\n-----END PRIVATE KEY-----";
+    const plainResponse = toJoinRequestResponse({
+      id: "join-request-synthetic-plain",
+      claimSecretHash: "claim-hash-synthetic",
+      agentDefaultsPayload: {
+        devicePrivateKeyPem: { type: "plain", value: syntheticPem },
+      },
+    } as any);
+    expect(JSON.stringify(plainResponse)).not.toContain(syntheticPem);
+    expect(plainResponse.agentDefaultsPayload).toMatchObject({
+      devicePrivateKeyPem: { type: "plain", value: "***REDACTED***" },
+    });
   });
 });
 
