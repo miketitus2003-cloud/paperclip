@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 describe("explicit diagnostic credential forms", () => {
+  it("redacts private-key PEM blocks in diagnostic text", () => {
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-TEST-KEY-MATERIAL\n-----END PRIVATE KEY-----";
+    const result = redactCommandText(`probe failed: ${syntheticPem}`);
+    expect(result).not.toContain(syntheticPem);
+    expect(result).toContain("***REDACTED***");
+  });
+
   it("masks suffixed CLI options and encoded JSON headers with whitespace", () => {
     const jwt = `${Buffer.from(' {"alg":"HS256","typ":"JWT"}').toString("base64url")}.abcdefghijk.abcdefghijkl`;
     expect(redactCommandText("tool --api-key-prod sensitivevalue --token-policy readable"))

@@ -898,4 +898,20 @@ second-line\" status=401`,
       apiKey: REDACTED_EVENT_VALUE,
     });
   });
+
+  it("redacts the OpenClaw device private key from config and diagnostic text", () => {
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-TEST-KEY-MATERIAL\n-----END PRIVATE KEY-----";
+    const config = redactAgentAdapterConfig({ devicePrivateKeyPem: syntheticPem });
+    expect(config.devicePrivateKeyPem).toBe(REDACTED_EVENT_VALUE);
+    expect(JSON.stringify(config)).not.toContain(syntheticPem);
+    expect(redactSensitiveText(`connect failed with ${syntheticPem}`)).not.toContain(syntheticPem);
+
+    // Revision before/after snapshots use this same config redactor in their
+    // route serializer, so both historical and current inline values stay out.
+    const revision = {
+      beforeConfig: { adapterConfig: redactAgentAdapterConfig({ devicePrivateKeyPem: syntheticPem }) },
+      afterConfig: { adapterConfig: redactAgentAdapterConfig({ devicePrivateKeyPem: syntheticPem }) },
+    };
+    expect(JSON.stringify(revision)).not.toContain(syntheticPem);
+  });
 });

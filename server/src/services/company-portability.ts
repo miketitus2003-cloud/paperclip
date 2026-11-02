@@ -2273,7 +2273,8 @@ function normalizePortableConfig(
       key === "instructionsEntryFile" ||
       key === "promptTemplate" ||
       key === "bootstrapPromptTemplate" || // deprecated — kept for backward compat
-      key === "paperclipSkillSync"
+      key === "paperclipSkillSync" ||
+      key === "devicePrivateKeyPem"
     ) continue;
     if (key === "env") continue;
     next[key] = entry;
