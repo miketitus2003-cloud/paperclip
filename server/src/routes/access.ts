@@ -48,6 +48,7 @@ import {
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   PERMISSION_KEYS,
+  envBindingSchema,
   isUuidLike,
 } from "@paperclipai/shared";
 import type { DeploymentExposure, DeploymentMode, HumanCompanyMembershipRole } from "@paperclipai/shared";
@@ -982,18 +983,44 @@ export function normalizeAgentDefaultsForJoin(input: {
     normalized.disableDeviceAuth = parsedDisableDeviceAuth;
   }
 
-  const configuredDevicePrivateKeyPem = nonEmptyTrimmedString(
-    defaults.devicePrivateKeyPem
-  );
-  if (configuredDevicePrivateKeyPem) {
-    normalized.devicePrivateKeyPem = configuredDevicePrivateKeyPem;
+  const rawDevicePrivateKey = defaults.devicePrivateKeyPem;
+  let configuredDevicePrivateKey: string | Record<string, unknown> | null = null;
+  let invalidDevicePrivateKeyBinding = false;
+  if (rawDevicePrivateKey !== undefined && rawDevicePrivateKey !== null) {
+    const parsedBinding = envBindingSchema.safeParse(rawDevicePrivateKey);
+    const isUnsupportedUserSecretRef = parsedBinding.success &&
+      typeof parsedBinding.data === "object" &&
+      parsedBinding.data.type === "user_secret_ref";
+    if (!parsedBinding.success || isUnsupportedUserSecretRef) {
+      invalidDevicePrivateKeyBinding = true;
+      diagnostics.push({
+        code: "openclaw_gateway_device_key_binding_invalid",
+        level: "warn",
+        message: "Gateway device key must be a string, plain binding, or company secret reference."
+      });
+      fatalErrors.push(
+        "agentDefaultsPayload.devicePrivateKeyPem must be a string, plain binding, or company secret reference"
+      );
+    } else if (typeof parsedBinding.data === "string") {
+      configuredDevicePrivateKey = nonEmptyTrimmedString(parsedBinding.data);
+    } else if (parsedBinding.data.type === "plain") {
+      configuredDevicePrivateKey = nonEmptyTrimmedString(parsedBinding.data.value);
+    } else {
+      // Keep company-secret references intact. The persistence normalizer below
+      // validates that the referenced secret belongs to this company.
+      configuredDevicePrivateKey = parsedBinding.data as Record<string, unknown>;
+    }
+  }
+
+  if (configuredDevicePrivateKey) {
+    normalized.devicePrivateKeyPem = configuredDevicePrivateKey;
     diagnostics.push({
       code: "openclaw_gateway_device_key_configured",
       level: "info",
       message:
         "Gateway device key configured. Pairing approvals should persist for this agent."
     });
-  } else if (!disableDeviceAuth) {
+  } else if (!invalidDevicePrivateKeyBinding && !disableDeviceAuth) {
     try {
       normalized.devicePrivateKeyPem = generateEd25519PrivateKeyPem();
       diagnostics.push({
