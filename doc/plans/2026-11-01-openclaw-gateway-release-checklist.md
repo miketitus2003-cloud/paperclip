@@ -34,8 +34,6 @@ Existing records that still contain inline PEM require a controlled save/normali
 - Node 24.11.0 targeted run of `agents-service-secret-bindings.test.ts -t "resolves an OpenClaw device secret for signing without disclosing it"`: **blocked before test execution** when embedded PostgreSQL could not bind its local listener (`listen EPERM: operation not permitted 127.0.0.1`). Do not interpret this as a product assertion failure.
 - Node 24.11.0 `tsc --noEmit -p server/tsconfig.json` and `tsc --noEmit -p packages/adapters/openclaw-gateway/tsconfig.json`: **both exit 0** on the final source tree.
 - `git diff --check`: **pass**.
-- `node_modules/.bin/tsc --noEmit -p packages/adapters/openclaw-gateway/tsconfig.json`: **exit 0** (adapter package typecheck).
-- `git diff --check`: **pass**.
 - No workspace/full-suite retry was run. PR #1 remains unchanged. No live private key was read or generated.
 
 ## Remaining release gates
@@ -43,8 +41,8 @@ Existing records that still contain inline PEM require a controlled save/normali
 | Gate | State | Evidence needed / owner |
 | --- | --- | --- |
 | Device config and revision reads redact key | Partial | Synthetic config and revision-snapshot redaction assertions pass. Revision endpoints call the same `redactAgentAdapterConfig` function; an end-to-end revision route response remains unverified. |
-| Logs/diagnostics redact PEM | Pass (focused) | Synthetic PEM test in adapter-utils and server redaction file passed in the 65 passing tests. |
-| Export omits inline key and secret reference | Pending | Regression added to `company-portability.test.ts`; must run with supported Node 24+ because this checkout's Node 20 lacks `node:sqlite`. |
+| Logs/diagnostics redact PEM | Pass (focused) | Synthetic PEM tests in adapter-utils and server redaction passed in the 66 focused tests. |
+| Export omits inline key and secret reference | Pass (focused) | `company-portability.test.ts` passed 115/115 under Node 24.11.0, including inline PEM and secret-reference omission. |
 | Runtime adapter signing with resolved secret | Blocked | Synthetic Ed25519 integration regression is written, but embedded PostgreSQL cannot start because sandbox loopback bind is denied. Run it in an approved loopback-capable test runner; no real key is needed. |
 | Secret normalization and at-rest/backup controls | Partial | Existing `meta.secret` resolver found in `server/src/services/secrets.ts`; operator must confirm deployed provider, key custody, backup separation, permissions, and restore evidence. |
 | Six fixture tests and full workspace tests | Pending / gated | Revalidate #2 first in its prepared environment. Run at most one full workspace attempt only after that passes and known build/toolchain fixes are present. |
