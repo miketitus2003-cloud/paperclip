@@ -9,9 +9,9 @@ Status: **HOLD**. This is a development-only proposal on `fix/openclaw-device-pr
 | Lifecycle probe signed device auth and adapter-specific success-code verification | [PR #1](https://github.com/miketitus2003-cloud/paperclip/pull/1) | Existing separate reviewed Gateway patch; do not alter from this proposal. Prior supplied evidence: focused 80 tests and adapter build/typecheck passed; workspace full test gate remains failed (189 failed tests / 684 files in the general-server lane). |
 | `bundle-runtime.test.mjs` fixture removal correction | [PR #2](https://github.com/miketitus2003-cloud/paperclip/pull/2) | Separate minimal fixture proposal. Earlier request reported six targeted tests passing in its prepared environment. This branch has not revalidated it. |
 | Locked `tsx` CommonJS API compatibility proposal | [PR #3](https://github.com/miketitus2003-cloud/paperclip/pull/3), head `8963a5a9193096cfd37aa2756506e560016d5dfd` | Draft and open, based on PR #1 (`b3bd7fddd7357e9f1b69b252d88c729e4768950e`). PR #3 records Node 24.11.0/pnpm 9.15.4 verification, base/combined recovery comparison, 142/142 recovery tests, builds/typechecks, and affected Gateway tests. Risks include the downgrade from tsx 4.23.15 and no full workspace suite/hosted CI. |
-| Device private-key exposure and secret-reference support | This branch, `fix/openclaw-device-private-key-secrecy` | Local draft only; targeted checks partial (see below). |
+| Device private-key exposure and secret-reference support | [PR #4](https://github.com/miketitus2003-cloud/paperclip/pull/4), head `1b96be82140fb4dfb33d779e5620baa2e127a127` | Separate draft PR based on `master`; targeted checks partial (see below). |
 
-Before any release decision, create one disposable candidate containing the reviewed heads of #1 and #2, the exact `tsx` proposal head, and this key-protection change. Confirm identities by commit SHA; do not merge the PRs to do so.
+Before any release decision, create one disposable candidate containing the reviewed heads of #1 and #2, the exact `tsx` proposal head, and PR #4's key-protection head. Confirm identities by commit SHA; do not merge the PRs to do so.
 
 ## Key behavior proposed
 
@@ -42,7 +42,7 @@ Existing records that still contain inline PEM require a controlled save/normali
 
 | Gate | State | Evidence needed / owner |
 | --- | --- | --- |
-| Device config and revision reads redact key | Partial | Synthetic config and diagnostic redaction tests pass. Revision endpoints call the same `redactAgentAdapterConfig` function; an end-to-end revision route response remains unverified. |
+| Device config and revision reads redact key | Partial | Synthetic config and revision-snapshot redaction assertions pass. Revision endpoints call the same `redactAgentAdapterConfig` function; an end-to-end revision route response remains unverified. |
 | Logs/diagnostics redact PEM | Pass (focused) | Synthetic PEM test in adapter-utils and server redaction file passed in the 65 passing tests. |
 | Export omits inline key and secret reference | Pending | Regression added to `company-portability.test.ts`; must run with supported Node 24+ because this checkout's Node 20 lacks `node:sqlite`. |
 | Runtime adapter signing with resolved secret | Blocked | Synthetic Ed25519 integration regression is written, but embedded PostgreSQL cannot start because sandbox loopback bind is denied. Run it in an approved loopback-capable test runner; no real key is needed. |
