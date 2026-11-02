@@ -851,6 +851,60 @@ describe("company portability", () => {
     });
   });
 
+  it("omits OpenClaw device key material and bindings from portable config", async () => {
+    const syntheticPem = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-TEST-KEY-MATERIAL\n-----END PRIVATE KEY-----";
+    agentSvc.list.mockResolvedValue([{
+      id: "agent-openclaw-key",
+      name: "GatewayAgent",
+      status: "idle",
+      role: "engineer",
+      title: null,
+      icon: null,
+      reportsTo: null,
+      capabilities: null,
+      adapterType: "openclaw_gateway",
+      adapterConfig: {
+        url: "ws://gateway.invalid:18791",
+        devicePrivateKeyPem: syntheticPem,
+        unrelated: "retained",
+      },
+      runtimeConfig: {},
+      budgetMonthlyCents: 0,
+      permissions: { canCreateAgents: false },
+      metadata: null,
+    }]);
+
+    const exported = await exportCompanyAndAgents(companyPortabilityService({} as any));
+    const serialized = JSON.stringify(exported);
+    expect(serialized).not.toContain(syntheticPem);
+    expect(serialized).not.toContain("devicePrivateKeyPem");
+    expect(serialized).toContain("ws://gateway.invalid:18791");
+    expect(serialized).toContain("retained");
+
+    agentSvc.list.mockResolvedValue([{
+      id: "agent-openclaw-key-ref",
+      name: "GatewayAgentRef",
+      status: "idle",
+      role: "engineer",
+      title: null,
+      icon: null,
+      reportsTo: null,
+      capabilities: null,
+      adapterType: "openclaw_gateway",
+      adapterConfig: {
+        url: "ws://gateway.invalid:18791",
+        devicePrivateKeyPem: { type: "secret_ref", secretId: "synthetic-secret-binding", version: "latest" },
+      },
+      runtimeConfig: {},
+      budgetMonthlyCents: 0,
+      permissions: { canCreateAgents: false },
+      metadata: null,
+    }]);
+    const exportedRef = await exportCompanyAndAgents(companyPortabilityService({} as any));
+    expect(JSON.stringify(exportedRef)).not.toContain("devicePrivateKeyPem");
+    expect(JSON.stringify(exportedRef)).not.toContain("synthetic-secret-binding");
+  });
+
   it("exports default sidebar order into the Paperclip extension and manifest", async () => {
     const portability = companyPortabilityService({} as any);
 
