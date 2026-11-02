@@ -56,9 +56,26 @@ function scrub(value) {
     .replace(/synthetic-[A-Za-z0-9._~-]+/g, "[SYNTHETIC VALUE REDACTED]");
 }
 
+function createLineScrubber(emit) {
+  let inPrivateKey = false;
+  return (line) => {
+    if (inPrivateKey) {
+      if (/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(line)) inPrivateKey = false;
+      return;
+    }
+    if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(line)) {
+      emit("[REDACTED PRIVATE KEY]");
+      if (!/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(line)) inPrivateKey = true;
+      return;
+    }
+    emit(scrub(line));
+  };
+}
+
 const mode = process.argv[2];
 if (mode === "stream") {
-  for await (const line of readline.createInterface({ input: process.stdin })) console.log(scrub(line));
+  const consume = createLineScrubber((line) => console.log(line));
+  for await (const line of readline.createInterface({ input: process.stdin })) consume(line);
 } else if (mode === "report") {
   const file = process.argv[3];
   const report = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -79,6 +96,17 @@ if (mode === "stream") {
   console.log(`exact_test_status=${exact.map((test) => test.status).join(",") || "missing"}`);
   console.log(`report_total=${safe.numTotalTests} passed=${safe.numPassedTests} failed=${safe.numFailedTests} pending=${safe.numPendingTests}`);
   process.exit(passed ? 0 : 1);
+} else if (mode === "self-test") {
+  const output = [];
+  const consume = createLineScrubber((line) => output.push(line));
+  ["before", "-----BEGIN PRIVATE KEY-----", "SYNTHETIC_PRIVATE_KEY_SENTINEL", "-----END PRIVATE KEY-----", "after"]
+    .forEach(consume);
+  const safe = output.join("\n");
+  if (!safe.includes("[REDACTED PRIVATE KEY]") || safe.includes("SYNTHETIC_PRIVATE_KEY_SENTINEL")) {
+    console.error("sanitizer multiline private-key check failed");
+    process.exit(1);
+  }
+  console.log("sanitizer_multiline_private_key=PASS");
 } else {
   console.error("Unknown sanitizer mode");
   process.exit(2);
@@ -129,6 +157,7 @@ echo "test_file=$TEST_FILE exact_test_blob=$EXPECTED_TEST_BLOB"
 echo "node=$($NODE24 --version)"
 echo "sanitized_logs=$LOG_DIR"
 
+run_step sanitizer-self-test clean_env "$TIMEOUT_BIN" --signal=TERM --kill-after=5s 15s "$NODE24" "$WORK_ROOT/sanitize.mjs" self-test
 run_step loopback-preflight clean_env "$TIMEOUT_BIN" --signal=TERM --kill-after=5s 10s "$NODE24" -e '
   const net=require("node:net"), server=net.createServer();
   server.once("error",e=>{console.error(`loopback unavailable: ${e.code||e.message}`);process.exit(1)});
