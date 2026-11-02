@@ -1,5 +1,13 @@
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
-import { generateKeyPairSync, randomUUID, verify } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  verify,
+} from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +32,23 @@ import { agentService } from "../services/agents.ts";
 import { secretService } from "../services/secrets.js";
 
 const openclawSocketState = vi.hoisted(() => ({ connectParams: null as Record<string, unknown> | null }));
+
+function ed25519PublicKeyFingerprint(privateKeyPem: string): string {
+  const publicKeyDer = createPublicKey(createPrivateKey(privateKeyPem)).export({ type: "spki", format: "der" });
+  return createHash("sha256").update(publicKeyDer).digest("hex");
+}
+
+function expectSameEd25519Identity(expectedPrivateKeyPem: string, resolvedValue: unknown) {
+  expect(typeof resolvedValue).toBe("string");
+  const resolvedPrivateKeyPem = resolvedValue as string;
+  expect(ed25519PublicKeyFingerprint(resolvedPrivateKeyPem)).toBe(
+    ed25519PublicKeyFingerprint(expectedPrivateKeyPem),
+  );
+
+  const message = Buffer.from("synthetic Paperclip OpenClaw device identity check");
+  const signature = sign(null, message, createPrivateKey(resolvedPrivateKeyPem));
+  expect(verify(null, message, createPublicKey(createPrivateKey(expectedPrivateKeyPem)), signature)).toBe(true);
+}
 
 vi.mock("ws", async () => {
   const { EventEmitter } = await import("node:events");
@@ -348,7 +373,7 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
       { consumerType: "agent", consumerId: persisted.id },
       { adapterType: "openclaw_gateway" },
     );
-    expect(resolved.config.devicePrivateKeyPem).toBe(syntheticPrivatePem);
+    expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
     expect(secretRef.secretId).toBeTruthy();
 
     const configRead = redactAgentAdapterConfig(storedConfig);
