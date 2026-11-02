@@ -4,7 +4,7 @@ umask 077
 
 readonly BASE_CANDIDATE="968b62447626274a79360334c69b54da7ce76896"
 readonly TEST_FILE="server/src/__tests__/device-secret-backup-restore.test.ts"
-readonly EXPECTED_TEST_BLOB="9d592e87a34a89f56ff0a197f3358a3632cf79e9"
+readonly EXPECTED_TEST_BLOB="6a109dc75f2d989eb8d63f903ba325d6276688c6"
 NODE24="${NODE24:-/tmp/paperclip-test-tools/node_modules/node/bin/node}"
 PNPM_CLI="${PNPM_CLI:-/tmp/paperclip-workspace-tools/node_modules/pnpm/bin/pnpm.cjs}"
 PNPM_STORE="${PNPM_STORE:-/tmp/paperclip-pnpm-store}"
