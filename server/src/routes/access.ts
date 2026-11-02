@@ -109,6 +109,7 @@ import {
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 import { secretService } from "../services/secrets.js";
+import { REDACTED_EVENT_VALUE } from "../redaction.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -305,9 +306,30 @@ function listAvailableSkills(): AvailableSkill[] {
   return skills;
 }
 
-function toJoinRequestResponse(row: typeof joinRequests.$inferSelect) {
+export function toJoinRequestResponse(row: typeof joinRequests.$inferSelect) {
   const { claimSecretHash: _claimSecretHash, ...safe } = row;
-  return safe;
+  const defaultsPayload = isPlainObject(row.agentDefaultsPayload)
+    ? { ...row.agentDefaultsPayload }
+    : row.agentDefaultsPayload;
+  if (isPlainObject(defaultsPayload)) {
+    const deviceKey = defaultsPayload.devicePrivateKeyPem;
+    if (typeof deviceKey === "string") {
+      defaultsPayload.devicePrivateKeyPem = REDACTED_EVENT_VALUE;
+    } else if (
+      isPlainObject(deviceKey) &&
+      deviceKey.type === "plain" &&
+      typeof deviceKey.value === "string"
+    ) {
+      defaultsPayload.devicePrivateKeyPem = {
+        ...deviceKey,
+        value: REDACTED_EVENT_VALUE,
+      };
+    }
+  }
+  return {
+    ...safe,
+    agentDefaultsPayload: defaultsPayload,
+  };
 }
 
 type JoinDiagnostic = {
@@ -1089,7 +1111,10 @@ export async function prepareAgentDefaultsPayloadForJoinPersistence(input: {
   normalized: Record<string, unknown> | null;
   actor?: { userId?: string | null; agentId?: string | null };
 }): Promise<Record<string, unknown> | null> {
-  if (input.adapterType !== "hermes_gateway" || !input.normalized) {
+  if (
+    !input.normalized ||
+    !["hermes_gateway", "openclaw_gateway"].includes(input.adapterType ?? "")
+  ) {
     return input.normalized;
   }
 
