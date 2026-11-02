@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly BASE_CANDIDATE="968b62447626274a79360334c69b54da7ce76896"
-readonly TEST_FILE="server/src/__tests__/device-secret-backup-restore.test.ts"
+readonly TEST_FILE="src/__tests__/device-secret-backup-restore.test.ts"
 readonly EXPECTED_TEST_BLOB="6a109dc75f2d989eb8d63f903ba325d6276688c6"
 NODE24="${NODE24:-/tmp/paperclip-test-tools/node_modules/node/bin/node}"
 PNPM_CLI="${PNPM_CLI:-/tmp/paperclip-workspace-tools/node_modules/pnpm/bin/pnpm.cjs}"
@@ -89,12 +89,15 @@ if (mode === "stream") {
   fs.writeFileSync(file, JSON.stringify(safe, null, 2) + "\n", { mode: 0o600 });
   const tests = safe.testResults.flatMap((file) => file.assertionResults);
   const exact = tests.filter((test) => test.fullName === "synthetic encrypted device secret backup and restore restores encrypted secret metadata and resolves the same synthetic Ed25519 identity");
-  const passed = exact.length === 1 && exact[0].status === "passed"
+  const zeroCollected = safe.numTotalTests === 0 || tests.length === 0;
+  const passed = !zeroCollected && exact.length === 1 && exact[0].status === "passed"
     && safe.numTotalTests === 1 && safe.numPassedTests === 1
     && safe.numFailedTests === 0 && safe.numPendingTests === 0;
   console.log(`exact_test_matches=${exact.length}`);
   console.log(`exact_test_status=${exact.map((test) => test.status).join(",") || "missing"}`);
+  console.log(`zero_test_collection=${zeroCollected}`);
   console.log(`report_total=${safe.numTotalTests} passed=${safe.numPassedTests} failed=${safe.numFailedTests} pending=${safe.numPendingTests}`);
+  if (zeroCollected) console.error("ERROR: Vitest collected zero tests; refusing an empty-report pass");
   process.exit(passed ? 0 : 1);
 } else if (mode === "self-test") {
   const output = [];
@@ -181,7 +184,7 @@ test_status=0
 if run_logged "$LOG_DIR/database-backup-restore.log" \
   clean_env "$TIMEOUT_BIN" --signal=TERM --kill-after=10s 150s \
   pnpm --filter @paperclipai/server exec vitest run "$TEST_FILE" \
-    --reporter=json --outputFile="$report"; then
+    --reporter=json --disableConsoleIntercept --outputFile="$report"; then
   test_status=0
 else
   test_status=$?
