@@ -28,6 +28,7 @@ Gateway connect identity fields:
 - role (string, optional): gateway role (default operator)
 - scopes (string[] | comma string, optional): gateway scopes (default ["operator.admin"])
 - disableDeviceAuth (boolean, optional): disable signed device payload in connect params (default false)
+- devicePrivateKeyPem (secret, optional): stable Ed25519 signing key. Paperclip generates this key when absent and stores it as an encrypted secret reference; exports omit it and imported agents receive a new device identity.
 
 Request behavior fields:
 - payloadTemplate (object, optional): additional fields merged into gateway agent params

@@ -48,6 +48,7 @@ import {
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   PERMISSION_KEYS,
+  envBindingSchema,
   isUuidLike,
 } from "@paperclipai/shared";
 import type { DeploymentExposure, DeploymentMode, HumanCompanyMembershipRole } from "@paperclipai/shared";
@@ -109,6 +110,7 @@ import {
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 import { secretService } from "../services/secrets.js";
+import { REDACTED_EVENT_VALUE } from "../redaction.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -305,9 +307,30 @@ function listAvailableSkills(): AvailableSkill[] {
   return skills;
 }
 
-function toJoinRequestResponse(row: typeof joinRequests.$inferSelect) {
+export function toJoinRequestResponse(row: typeof joinRequests.$inferSelect) {
   const { claimSecretHash: _claimSecretHash, ...safe } = row;
-  return safe;
+  const defaultsPayload = isPlainObject(row.agentDefaultsPayload)
+    ? { ...row.agentDefaultsPayload }
+    : row.agentDefaultsPayload;
+  if (isPlainObject(defaultsPayload)) {
+    const deviceKey = defaultsPayload.devicePrivateKeyPem;
+    if (typeof deviceKey === "string") {
+      defaultsPayload.devicePrivateKeyPem = REDACTED_EVENT_VALUE;
+    } else if (
+      isPlainObject(deviceKey) &&
+      deviceKey.type === "plain" &&
+      typeof deviceKey.value === "string"
+    ) {
+      defaultsPayload.devicePrivateKeyPem = {
+        ...deviceKey,
+        value: REDACTED_EVENT_VALUE,
+      };
+    }
+  }
+  return {
+    ...safe,
+    agentDefaultsPayload: defaultsPayload,
+  };
 }
 
 type JoinDiagnostic = {
@@ -960,18 +983,44 @@ export function normalizeAgentDefaultsForJoin(input: {
     normalized.disableDeviceAuth = parsedDisableDeviceAuth;
   }
 
-  const configuredDevicePrivateKeyPem = nonEmptyTrimmedString(
-    defaults.devicePrivateKeyPem
-  );
-  if (configuredDevicePrivateKeyPem) {
-    normalized.devicePrivateKeyPem = configuredDevicePrivateKeyPem;
+  const rawDevicePrivateKey = defaults.devicePrivateKeyPem;
+  let configuredDevicePrivateKey: string | Record<string, unknown> | null = null;
+  let invalidDevicePrivateKeyBinding = false;
+  if (rawDevicePrivateKey !== undefined && rawDevicePrivateKey !== null) {
+    const parsedBinding = envBindingSchema.safeParse(rawDevicePrivateKey);
+    const isUnsupportedUserSecretRef = parsedBinding.success &&
+      typeof parsedBinding.data === "object" &&
+      parsedBinding.data.type === "user_secret_ref";
+    if (!parsedBinding.success || isUnsupportedUserSecretRef) {
+      invalidDevicePrivateKeyBinding = true;
+      diagnostics.push({
+        code: "openclaw_gateway_device_key_binding_invalid",
+        level: "warn",
+        message: "Gateway device key must be a string, plain binding, or company secret reference."
+      });
+      fatalErrors.push(
+        "agentDefaultsPayload.devicePrivateKeyPem must be a string, plain binding, or company secret reference"
+      );
+    } else if (typeof parsedBinding.data === "string") {
+      configuredDevicePrivateKey = nonEmptyTrimmedString(parsedBinding.data);
+    } else if (parsedBinding.data.type === "plain") {
+      configuredDevicePrivateKey = nonEmptyTrimmedString(parsedBinding.data.value);
+    } else {
+      // Keep company-secret references intact. The persistence normalizer below
+      // validates that the referenced secret belongs to this company.
+      configuredDevicePrivateKey = parsedBinding.data as Record<string, unknown>;
+    }
+  }
+
+  if (configuredDevicePrivateKey) {
+    normalized.devicePrivateKeyPem = configuredDevicePrivateKey;
     diagnostics.push({
       code: "openclaw_gateway_device_key_configured",
       level: "info",
       message:
         "Gateway device key configured. Pairing approvals should persist for this agent."
     });
-  } else if (!disableDeviceAuth) {
+  } else if (!invalidDevicePrivateKeyBinding && !disableDeviceAuth) {
     try {
       normalized.devicePrivateKeyPem = generateEd25519PrivateKeyPem();
       diagnostics.push({
@@ -1089,7 +1138,10 @@ export async function prepareAgentDefaultsPayloadForJoinPersistence(input: {
   normalized: Record<string, unknown> | null;
   actor?: { userId?: string | null; agentId?: string | null };
 }): Promise<Record<string, unknown> | null> {
-  if (input.adapterType !== "hermes_gateway" || !input.normalized) {
+  if (
+    !input.normalized ||
+    !["hermes_gateway", "openclaw_gateway"].includes(input.adapterType ?? "")
+  ) {
     return input.normalized;
   }
 
