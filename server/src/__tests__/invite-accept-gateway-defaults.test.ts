@@ -1,4 +1,12 @@
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  verify,
+} from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +22,7 @@ import {
   createDb,
   invites,
   joinRequests,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { agentService } from "../services/agents.js";
@@ -29,6 +38,34 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+function ed25519PublicKeyFingerprint(privateKeyPem: string): string {
+  const publicKeyDer = createPublicKey(createPrivateKey(privateKeyPem)).export({ type: "spki", format: "der" });
+  return createHash("sha256").update(publicKeyDer).digest("hex");
+}
+
+function expectSameEd25519Identity(expectedPrivateKeyPem: string, resolvedValue: unknown) {
+  expect(typeof resolvedValue).toBe("string");
+  const resolvedPrivateKeyPem = resolvedValue as string;
+  expect(ed25519PublicKeyFingerprint(resolvedPrivateKeyPem)).toBe(
+    ed25519PublicKeyFingerprint(expectedPrivateKeyPem),
+  );
+
+  const message = Buffer.from("synthetic Paperclip OpenClaw device identity check");
+  const signature = sign(null, message, createPrivateKey(resolvedPrivateKeyPem));
+  expect(verify(null, message, createPublicKey(createPrivateKey(expectedPrivateKeyPem)), signature)).toBe(true);
+}
+
+function expectSameSecretBindingIdentity(actualValue: unknown, expectedValue: unknown) {
+  expect(actualValue).toMatchObject({ type: "secret_ref" });
+  expect(expectedValue).toMatchObject({ type: "secret_ref" });
+  const actual = actualValue as Record<string, unknown>;
+  const expected = expectedValue as Record<string, unknown>;
+  expect(actual.secretId).toBe(expected.secretId);
+  expect(actual.version ?? "latest").toBe(expected.version ?? "latest");
+  expect(actual.projectionClass ?? "unclassified").toBe(expected.projectionClass ?? "unclassified");
+  expect(actual.projectionAllowlistKey ?? null).toBe(expected.projectionAllowlistKey ?? null);
+}
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -324,6 +361,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
   afterEach(async () => {
     await db.delete(joinRequests);
     await db.delete(invites);
+    await db.delete(principalPermissionGrants);
     await db.delete(companySecretBindings);
     await db.delete(agents);
     await db.delete(companySecretVersions);
@@ -504,7 +542,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
       { consumerType: "agent", consumerId: onboardedAgent.id },
       { adapterType: "openclaw_gateway" },
     );
-    expect(resolved.config.devicePrivateKeyPem).toBe(syntheticPrivatePem);
+    expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
   });
 
   it.each(["managed secret reference", "legacy plain binding"] as const)(
@@ -588,6 +626,19 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
         normalized: normalizedInitial.normalized,
       });
       expect(persistedInitial?.devicePrivateKeyPem).toMatchObject({ type: "secret_ref" });
+      const initialBinding = persistedInitial?.devicePrivateKeyPem as Record<string, unknown>;
+      const [secretRecord] = await db.select({
+        companyId: companySecrets.companyId,
+        scope: companySecrets.scope,
+        provider: companySecrets.provider,
+        managedMode: companySecrets.managedMode,
+      }).from(companySecrets).where(eq(companySecrets.id, initialBinding.secretId as string));
+      expect(secretRecord).toMatchObject({
+        companyId,
+        scope: "company",
+        provider: "local_encrypted",
+        managedMode: "paperclip_managed",
+      });
 
       const hiredAgent = await createAgentLifecycle(db).requestHire(companyId, {
         name: `OpenClaw replay ${bindingKind}`,
@@ -643,7 +694,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
         adapterType: "openclaw_gateway",
         normalized: normalizedReplay.normalized,
       });
-      expect(persistedReplay?.devicePrivateKeyPem).toEqual(persistedInitial?.devicePrivateKeyPem);
+      expectSameSecretBindingIdentity(persistedReplay?.devicePrivateKeyPem, persistedInitial?.devicePrivateKeyPem);
 
       await db.update(joinRequests).set({ agentDefaultsPayload: persistedReplay })
         .where(eq(joinRequests.id, joinRequestId));
@@ -657,7 +708,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
         adapterType: "openclaw_gateway",
         adapterConfig: approvedReplayConfig,
       });
-      expect(updatedAgent?.adapterConfig.devicePrivateKeyPem).toEqual(persistedInitial?.devicePrivateKeyPem);
+      expectSameSecretBindingIdentity(updatedAgent?.adapterConfig.devicePrivateKeyPem, persistedInitial?.devicePrivateKeyPem);
 
       const resolved = await secretService(db).resolveAdapterConfigForRuntime(
         companyId,
@@ -665,7 +716,7 @@ describeEmbeddedPostgres("prepareAgentDefaultsPayloadForJoinPersistence (adapter
         { consumerType: "agent", consumerId: hiredAgent.id },
         { adapterType: "openclaw_gateway" },
       );
-      expect(resolved.config.devicePrivateKeyPem).toBe(syntheticPrivatePem);
+      expectSameEd25519Identity(syntheticPrivatePem, resolved.config.devicePrivateKeyPem);
     },
   );
 });
