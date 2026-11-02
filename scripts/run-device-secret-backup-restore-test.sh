@@ -4,6 +4,7 @@ umask 077
 
 readonly BASE_CANDIDATE="968b62447626274a79360334c69b54da7ce76896"
 readonly TEST_FILE="src/__tests__/device-secret-backup-restore.test.ts"
+readonly TEST_FILE_FROM_REPO="server/$TEST_FILE"
 readonly EXPECTED_TEST_BLOB="6a109dc75f2d989eb8d63f903ba325d6276688c6"
 NODE24="${NODE24:-/tmp/paperclip-test-tools/node_modules/node/bin/node}"
 PNPM_CLI="${PNPM_CLI:-/tmp/paperclip-workspace-tools/node_modules/pnpm/bin/pnpm.cjs}"
@@ -33,7 +34,7 @@ if ! git merge-base --is-ancestor "$BASE_CANDIDATE" HEAD; then
   echo "BLOCKED: checkout is not based on candidate $BASE_CANDIDATE" >&2
   exit 2
 fi
-if [[ ! -f "$TEST_FILE" ]] || [[ "$(git hash-object "$TEST_FILE")" != "$EXPECTED_TEST_BLOB" ]]; then
+if [[ ! -f "$TEST_FILE_FROM_REPO" ]] || [[ "$(git hash-object "$TEST_FILE_FROM_REPO")" != "$EXPECTED_TEST_BLOB" ]]; then
   echo "BLOCKED: synthetic backup/restore regression differs from reviewed blob $EXPECTED_TEST_BLOB" >&2
   exit 2
 fi
