@@ -1539,7 +1539,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(costUsd > 0 ? { costUsd } : {}),
         resultJson: strictReceiptEnabled
           ? {
-              ...(asRecord(latestResultPayload) ?? {}),
               receipt: {
                 verified: true,
                 gatewayRunId: resolvedAcceptedRunId,
@@ -1629,7 +1628,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           : pairingRequired
             ? "openclaw_gateway_pairing_required"
             : "openclaw_gateway_request_failed",
-        resultJson: asRecord(latestResultPayload),
+        resultJson: strictReceiptEnabled
+          ? { receipt: { verified: false, reason: "gateway_request_failed" } }
+          : asRecord(latestResultPayload),
       };
     } finally {
       client.close();

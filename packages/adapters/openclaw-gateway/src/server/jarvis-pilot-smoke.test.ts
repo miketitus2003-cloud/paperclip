@@ -13,12 +13,15 @@ const gateway = vi.hoisted(() => ({
   authorization: "",
   acceptedStatus: "accepted",
   acceptedRunId: "gateway-pilot-run-42" as string | undefined,
+  acceptedExtra: {} as Record<string, unknown>,
   waitStatus: "ok" as string | undefined,
+  waitError: undefined as string | undefined,
   waitRunId: "gateway-pilot-run-42" as string | undefined,
   eventRunId: "gateway-pilot-run-42" as string | undefined,
   lifecyclePhase: undefined as string | undefined,
   conflictingAssistantText: undefined as string | undefined,
   responseText: "JARVIS_PILOT_OK",
+  waitExtra: {} as Record<string, unknown>,
   assistantEventTiming: "before_wait_response" as "before_wait_response" | "after_wait_response" | "missing",
   agentError: undefined as string | undefined,
 }));
@@ -55,8 +58,18 @@ vi.mock("ws", async () => {
           })));
           return;
         }
-        payload = { status: gateway.acceptedStatus, ...(gateway.acceptedRunId ? { runId: gateway.acceptedRunId } : {}) };
+        payload = {
+          status: gateway.acceptedStatus,
+          ...(gateway.acceptedRunId ? { runId: gateway.acceptedRunId } : {}),
+          ...gateway.acceptedExtra,
+        };
       } else if (request.method === "agent.wait") {
+        if (gateway.waitError) {
+          queueMicrotask(() => this.emit("message", JSON.stringify({
+            type: "res", id: request.id, ok: false, error: { message: gateway.waitError },
+          })));
+          return;
+        }
         assistantEvent = () => {
           if (gateway.lifecyclePhase) {
             this.emit("message", JSON.stringify({
@@ -78,6 +91,7 @@ vi.mock("ws", async () => {
         payload = {
           ...(gateway.waitStatus === undefined ? {} : { status: gateway.waitStatus }),
           ...(gateway.waitRunId ? { runId: gateway.waitRunId } : {}),
+          ...gateway.waitExtra,
         };
       } else {
         throw new Error(`Unexpected mocked Gateway method: ${request.method}`);
@@ -197,12 +211,15 @@ describe("Jarvis pilot smoke harness through the OpenClaw adapter entry point", 
     gateway.authorization = "";
     gateway.acceptedStatus = "accepted";
     gateway.acceptedRunId = expectedRunId;
+    gateway.acceptedExtra = {};
     gateway.waitStatus = "ok";
+    gateway.waitError = undefined;
     gateway.waitRunId = expectedRunId;
     gateway.eventRunId = expectedRunId;
     gateway.lifecyclePhase = undefined;
     gateway.conflictingAssistantText = undefined;
     gateway.responseText = expectedResponse;
+    gateway.waitExtra = {};
     gateway.assistantEventTiming = "before_wait_response";
     gateway.agentError = undefined;
   });
@@ -225,6 +242,37 @@ describe("Jarvis pilot smoke harness through the OpenClaw adapter entry point", 
     gateway.assistantEventTiming = "after_wait_response";
     const result = await execute(context());
     validatePilotReceipt(result, gateway.requests);
+  });
+
+  it("returns only receipt metadata when the Gateway wait payload contains secret-like fields", async () => {
+    gateway.waitExtra = {
+      authToken: "SYNTHETIC_RECEIPT_SECRET_SENTINEL",
+      providerDebug: { privateKey: "SYNTHETIC_PRIVATE_KEY_SENTINEL" },
+    };
+    const result = await execute(context());
+
+    expect(result.exitCode).toBe(0);
+    expect(result.summary).toBe(expectedResponse);
+    expect(JSON.stringify(result.resultJson)).not.toContain("SYNTHETIC_RECEIPT_SECRET_SENTINEL");
+    expect(JSON.stringify(result.resultJson)).not.toContain("SYNTHETIC_PRIVATE_KEY_SENTINEL");
+    expect(result.resultJson).toEqual({
+      receipt: {
+        verified: true,
+        gatewayRunId: expectedRunId,
+        terminalStatus: "ok",
+        responseMatched: true,
+      },
+    });
+  });
+
+  it("returns a redacted failed receipt when agent.wait errors after an accepted response", async () => {
+    gateway.acceptedExtra = { authToken: "SYNTHETIC_ACCEPTED_PAYLOAD_SECRET" };
+    gateway.waitError = "synthetic wait failure";
+    const result = await execute(context());
+
+    expect(result.exitCode).toBe(1);
+    expect(JSON.stringify(result.resultJson)).not.toContain("SYNTHETIC_ACCEPTED_PAYLOAD_SECRET");
+    expect(result.resultJson).toEqual({ receipt: { verified: false, reason: "gateway_request_failed" } });
   });
 
   it("preserves legacy behavior when the optional strict marker is empty", async () => {
