@@ -8,4 +8,11 @@ describe("OpenClaw Gateway config schema", () => {
       meta: { secret: true },
     }));
   });
+
+  it("exposes strict Gateway receipt verification as an optional exact marker", () => {
+    expect(getConfigSchema().fields).toContainEqual(expect.objectContaining({
+      key: "strictReceiptExpectedResponse",
+      type: "text",
+    }));
+  });
 });

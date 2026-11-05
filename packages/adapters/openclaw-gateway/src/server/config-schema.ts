@@ -10,6 +10,12 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Paperclip generates and stores this as an encrypted secret reference for signed Gateway device authentication. Do not export or share the key.",
         meta: { secret: true },
       },
+      {
+        key: "strictReceiptExpectedResponse",
+        label: "Strict Gateway receipt marker",
+        type: "text",
+        hint: "Optional. When set, require a matching Gateway run ID, agent.wait status ok, and an exact assistant response for that run.",
+      },
     ],
   };
 }

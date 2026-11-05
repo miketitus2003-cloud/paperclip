@@ -80,6 +80,14 @@ The agent request is built as:
 
 If `agent.wait` returns `timeout`, adapter returns `openclaw_gateway_wait_timeout`.
 
+Set `strictReceiptExpectedResponse` to opt into strict task receipts. The adapter
+then requires the `agent` acceptance to include a run ID, calls `agent.wait`
+even if the acceptance status is `ok`, and requires the wait response to carry
+the same run ID and terminal `status: "ok"`. It also requires assistant text
+streamed for that exact run to equal the configured marker byte-for-byte. A
+missing, conflicting, or different value returns a failed receipt. Leave the
+field unset to retain the existing behavior for ordinary callers.
+
 ## Log Format
 
 Structured gateway event logs use:

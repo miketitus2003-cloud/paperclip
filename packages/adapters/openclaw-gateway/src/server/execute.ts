@@ -92,6 +92,9 @@ const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
 const DEFAULT_CLIENT_VERSION = "paperclip";
 const DEFAULT_ROLE = "operator";
+// agent.wait may settle before the final assistant stream frame is delivered.
+// Keep the post-terminal event grace short and bounded; never resubmit the task.
+const STRICT_RECEIPT_EVENT_TIMEOUT_MS = 1_000;
 
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
@@ -104,6 +107,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function nonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function strictIdentifier(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.trim() === value ? value : null;
 }
 
 function parseOptionalPositiveInteger(value: unknown): number | null {
@@ -996,7 +1003,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
   const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
   const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
-
+  const strictReceiptExpectedResponse = ctx.config.strictReceiptExpectedResponse;
+  const strictReceiptEnabled = typeof strictReceiptExpectedResponse === "string" && strictReceiptExpectedResponse.length > 0;
+  const strictReceiptConfigInvalid =
+    (strictReceiptExpectedResponse !== undefined && strictReceiptExpectedResponse !== null && typeof strictReceiptExpectedResponse !== "string") ||
+    (typeof strictReceiptExpectedResponse === "string" && strictReceiptEnabled && !strictReceiptExpectedResponse.trim());
+  if (strictReceiptConfigInvalid) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "OpenClaw strict receipt requires a non-empty exact expected response",
+      errorCode: "openclaw_gateway_receipt_config_invalid",
+      resultJson: { receipt: { verified: false, reason: "expected_response_missing" } },
+    };
+  }
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
 
@@ -1116,8 +1137,40 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   while (true) {
     const trackedRunIds = new Set<string>([ctx.runId]);
     const assistantChunks: string[] = [];
+    const assistantChunksByRunId = new Map<string, string[]>();
+    const assistantEventWaitersByRunId = new Map<string, Set<() => void>>();
+    const assistantEvidenceConflictsByRunId = new Set<string>();
+    const lifecycleErrorsByRunId = new Map<string, string>();
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
+
+    const waitForAssistantResponse = (runId: string): Promise<string | null> => {
+      const existing = assistantChunksByRunId.get(runId);
+      if (existing?.length) return Promise.resolve(existing.join(""));
+
+      return new Promise((resolve) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = (response: string | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          const waiters = assistantEventWaitersByRunId.get(runId);
+          waiters?.delete(checkForResponse);
+          if (waiters?.size === 0) assistantEventWaitersByRunId.delete(runId);
+          resolve(response);
+        };
+        const checkForResponse = () => {
+          const chunks = assistantChunksByRunId.get(runId);
+          if (chunks?.length) finish(chunks.join(""));
+        };
+        const waiters = assistantEventWaitersByRunId.get(runId) ?? new Set<() => void>();
+        waiters.add(checkForResponse);
+        assistantEventWaitersByRunId.set(runId, waiters);
+        timer = setTimeout(() => finish(null), STRICT_RECEIPT_EVENT_TIMEOUT_MS);
+        checkForResponse();
+      });
+    };
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
@@ -1133,38 +1186,50 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const payload = asRecord(frame.payload);
       if (!payload) return;
 
-      const runId = nonEmpty(payload.runId);
+      const runId = strictReceiptEnabled ? strictIdentifier(payload.runId) : nonEmpty(payload.runId);
       if (!runId || !trackedRunIds.has(runId)) return;
 
       const stream = nonEmpty(payload.stream) ?? "unknown";
       const data = asRecord(payload.data) ?? {};
+      if (stream === "assistant") {
+        if (
+          strictReceiptEnabled &&
+          typeof data.delta === "string" && data.delta.length > 0 &&
+          typeof data.text === "string" && data.text.length > 0 &&
+          data.delta !== data.text
+        ) {
+          assistantEvidenceConflictsByRunId.add(runId);
+        }
+        const delta = strictReceiptEnabled
+          ? (typeof data.delta === "string" && data.delta.length > 0 ? data.delta : null)
+          : nonEmpty(data.delta);
+        const text = strictReceiptEnabled
+          ? (typeof data.text === "string" && data.text.length > 0 ? data.text : null)
+          : nonEmpty(data.text);
+        const chunk = delta ?? text;
+        if (chunk) {
+          assistantChunks.push(chunk);
+          const runChunks = assistantChunksByRunId.get(runId) ?? [];
+          runChunks.push(chunk);
+          assistantChunksByRunId.set(runId, runChunks);
+          for (const notify of assistantEventWaitersByRunId.get(runId) ?? []) notify();
+        }
+      } else if (stream === "error") {
+        lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+        const runError = nonEmpty(data.error) ?? nonEmpty(data.message);
+        if (runError) lifecycleErrorsByRunId.set(runId, runError);
+      } else if (stream === "lifecycle") {
+        const phase = nonEmpty(data.phase)?.toLowerCase();
+        if (phase === "error" || phase === "failed" || phase === "cancelled") {
+          lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+          const runError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? `Gateway lifecycle ended with ${phase}`;
+          lifecycleErrorsByRunId.set(runId, runError);
+        }
+      }
       await ctx.onLog(
         "stdout",
         `[openclaw-gateway:event] run=${runId} stream=${stream} data=${stringifyForLog(data, 8_000)}\n`,
       );
-
-      if (stream === "assistant") {
-        const delta = nonEmpty(data.delta);
-        const text = nonEmpty(data.text);
-        if (delta) {
-          assistantChunks.push(delta);
-        } else if (text) {
-          assistantChunks.push(text);
-        }
-        return;
-      }
-
-      if (stream === "error") {
-        lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
-        return;
-      }
-
-      if (stream === "lifecycle") {
-        const phase = nonEmpty(data.phase)?.toLowerCase();
-        if (phase === "error" || phase === "failed" || phase === "cancelled") {
-          lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
-        }
-      }
     };
 
     const client = new GatewayWsClient({
@@ -1252,12 +1317,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       latestResultPayload = acceptedPayload;
 
       const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
-      const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
-      trackedRunIds.add(acceptedRunId);
+      const acceptedRunId = strictReceiptEnabled
+        ? strictIdentifier(acceptedPayload?.runId)
+        : nonEmpty(acceptedPayload?.runId);
+      if (strictReceiptEnabled && !acceptedRunId) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "OpenClaw Gateway agent response did not include a run ID",
+          errorCode: "openclaw_gateway_receipt_run_id_missing",
+          resultJson: { receipt: { verified: false, gatewayRunId: null, terminalStatus: null } },
+        };
+      }
+      const resolvedAcceptedRunId = acceptedRunId ?? ctx.runId;
+      trackedRunIds.add(resolvedAcceptedRunId);
 
       await ctx.onLog(
         "stdout",
-        `[openclaw-gateway] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}\n`,
+        `[openclaw-gateway] agent accepted runId=${resolvedAcceptedRunId} status=${acceptedStatus || "unknown"}\n`,
       );
 
       if (acceptedStatus === "error") {
@@ -1269,20 +1347,57 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           timedOut: false,
           errorMessage,
           errorCode: "openclaw_gateway_agent_error",
-          resultJson: acceptedPayload,
+          resultJson: strictReceiptEnabled
+            ? { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: "error" } }
+            : acceptedPayload,
         };
       }
 
-      if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
+      let waitPayload: Record<string, unknown> | null = null;
+      let waitStatus = "";
+      if (strictReceiptEnabled || acceptedStatus !== "ok") {
+        waitPayload = await client.request<Record<string, unknown>>(
           "agent.wait",
-          { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
+          { runId: resolvedAcceptedRunId, timeoutMs: waitTimeoutMs },
           { timeoutMs: waitTimeoutMs + connectTimeoutMs },
         );
 
         latestResultPayload = waitPayload;
 
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        if (strictReceiptEnabled) {
+          const waitRunId = strictIdentifier(waitPayload?.runId);
+          if (!waitRunId) {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: "OpenClaw Gateway agent.wait response did not include a run ID",
+              errorCode: "openclaw_gateway_receipt_wait_run_id_missing",
+              resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus || null } },
+            };
+          }
+          if (waitRunId !== resolvedAcceptedRunId) {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: "OpenClaw Gateway agent.wait response run ID did not match the accepted run",
+              errorCode: "openclaw_gateway_receipt_run_id_mismatch",
+              resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, waitRunId, terminalStatus: waitStatus || null } },
+            };
+          }
+          if (!waitStatus) {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: "OpenClaw Gateway agent.wait response omitted terminal status",
+              errorCode: "openclaw_gateway_receipt_terminal_status_missing",
+              resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: null } },
+            };
+          }
+        }
         if (waitStatus === "timeout") {
           return {
             exitCode: 1,
@@ -1290,7 +1405,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             timedOut: true,
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
             errorCode: "openclaw_gateway_wait_timeout",
-            resultJson: waitPayload,
+            resultJson: strictReceiptEnabled
+              ? { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus } }
+              : waitPayload,
           };
         }
 
@@ -1304,7 +1421,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               lifecycleError ??
               "OpenClaw gateway run failed",
             errorCode: "openclaw_gateway_wait_error",
-            resultJson: waitPayload,
+            resultJson: strictReceiptEnabled
+              ? { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus } }
+              : waitPayload,
           };
         }
 
@@ -1315,7 +1434,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             timedOut: false,
             errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
             errorCode: "openclaw_gateway_wait_status_unexpected",
-            resultJson: waitPayload,
+            resultJson: strictReceiptEnabled
+              ? { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus } }
+              : waitPayload,
           };
         }
       }
@@ -1326,7 +1447,63 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         extractResultText(acceptedPayload) ??
         extractResultText(asRecord(latestResultPayload)) ??
         null;
-      const summary = summaryFromEvents || summaryFromPayload || null;
+      const summary = strictReceiptEnabled
+        ? await waitForAssistantResponse(resolvedAcceptedRunId)
+        : (summaryFromEvents || summaryFromPayload || null);
+
+      if (strictReceiptEnabled && waitStatus !== "ok") {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "OpenClaw Gateway strict receipt requires terminal status ok",
+          errorCode: "openclaw_gateway_receipt_terminal_status_failed",
+          resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus || null } },
+        };
+      }
+      const strictLifecycleError = lifecycleErrorsByRunId.get(resolvedAcceptedRunId);
+      if (strictReceiptEnabled && strictLifecycleError) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "OpenClaw Gateway emitted a failure lifecycle event for the accepted run",
+          errorCode: "openclaw_gateway_receipt_lifecycle_conflict",
+          resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus, lifecycleFailed: true } },
+        };
+      }
+      if (strictReceiptEnabled && assistantEvidenceConflictsByRunId.has(resolvedAcceptedRunId)) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "OpenClaw Gateway supplied conflicting assistant text fields for the accepted run",
+          errorCode: "openclaw_gateway_receipt_response_ambiguous",
+          resultJson: { receipt: { verified: false, gatewayRunId: resolvedAcceptedRunId, terminalStatus: waitStatus, responseAmbiguous: true } },
+        };
+      }
+      if (strictReceiptEnabled && summary !== strictReceiptExpectedResponse) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: summary === null
+            ? "OpenClaw Gateway did not emit an assistant response for the accepted run before the receipt deadline"
+            : "OpenClaw Gateway response did not exactly match the configured receipt marker",
+          errorCode: summary === null
+            ? "openclaw_gateway_receipt_response_missing"
+            : "openclaw_gateway_receipt_response_mismatch",
+          resultJson: {
+            receipt: {
+              verified: false,
+              gatewayRunId: resolvedAcceptedRunId,
+              terminalStatus: waitStatus,
+              responseMatched: false,
+              responsePresent: Boolean(summary),
+            },
+          },
+        };
+      }
 
       const acceptedResult = asRecord(acceptedPayload?.result);
       const latestPayload = asRecord(latestResultPayload);
@@ -1360,7 +1537,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(model ? { model } : {}),
         ...(usage ? { usage } : {}),
         ...(costUsd > 0 ? { costUsd } : {}),
-        resultJson: asRecord(latestResultPayload),
+        resultJson: strictReceiptEnabled
+          ? {
+              ...(asRecord(latestResultPayload) ?? {}),
+              receipt: {
+                verified: true,
+                gatewayRunId: resolvedAcceptedRunId,
+                terminalStatus: waitStatus,
+                responseMatched: true,
+              },
+            }
+          : asRecord(latestResultPayload),
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),
       };
@@ -1372,6 +1559,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       if (
         pairingRequired &&
+        !dispatchReported &&
         !disableDeviceAuth &&
         autoPairOnFirstConnect &&
         !autoPairAttempted &&

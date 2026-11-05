@@ -44,6 +44,17 @@ describe("buildOpenClawGatewayConfig", () => {
     expect(config.waitTimeoutMs).toBe(9000);
   });
 
+  it("preserves the optional strict receipt marker through normal adapter config construction", () => {
+    const config = buildOpenClawGatewayConfig({
+      ...baseValues(),
+      strictReceiptExpectedResponse: "JARVIS_PILOT_OK",
+      autoPairOnFirstConnect: false,
+    });
+
+    expect(config.strictReceiptExpectedResponse).toBe("JARVIS_PILOT_OK");
+    expect(config.autoPairOnFirstConnect).toBe(false);
+  });
+
   it("applies the documented identity defaults when unset", () => {
     const config = buildOpenClawGatewayConfig(baseValues());
     expect(config.sessionKeyStrategy).toBe("issue");

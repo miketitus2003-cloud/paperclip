@@ -806,6 +806,7 @@ export interface CreateConfigValues {
   disableDeviceAuth?: boolean;
   autoPairOnFirstConnect?: boolean;
   devicePrivateKeyPem?: string;
+  strictReceiptExpectedResponse?: string;
   role?: string;
   scopes?: string;
   paperclipApiUrl?: string;
