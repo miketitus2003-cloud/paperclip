@@ -41,6 +41,7 @@ Request behavior fields:
 - claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
 
 Session routing fields:
+- agentId (string, recommended): existing OpenClaw worker ID; use a distinct worker per Paperclip agent. Must agree with payloadTemplate.agentId and any selected agent-prefixed session key. Omission uses Gateway default routing and logs a warning when the session key also has no worker prefix.
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run
 - sessionKey (string, optional): fixed session key when strategy=fixed (default paperclip)
 

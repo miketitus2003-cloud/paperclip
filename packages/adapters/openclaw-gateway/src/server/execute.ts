@@ -141,7 +141,13 @@ function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
 }
 
 function prefixSessionKeyForAgent(sessionKey: string, agentId: string | null): string {
-  if (!agentId || sessionKey.startsWith("agent:")) return sessionKey;
+  if (sessionKey.startsWith("agent:")) {
+    if (agentId && !sessionKey.startsWith(`agent:${agentId}:`)) {
+      throw new Error("OpenClaw sessionKey worker must match agentId");
+    }
+    return sessionKey;
+  }
+  if (!agentId) return sessionKey;
   return `agent:${agentId}:${sessionKey}`;
 }
 
@@ -492,6 +498,18 @@ function joinWakePayloadSections(structuredWakePrompt: string, structuredWakeJso
   return sections.join("\n");
 }
 
+function resolveGatewayAgentId(configured: unknown, template: unknown): string | null {
+  if ([configured, template].some((value) => value != null && typeof value !== "string")) {
+    throw new Error("OpenClaw agentId must be a string");
+  }
+  const configuredId = nonEmpty(configured);
+  const templateId = nonEmpty(template);
+  if (configuredId && templateId && configuredId !== templateId) {
+    throw new Error("OpenClaw payloadTemplate.agentId must match agentId");
+  }
+  return configuredId ?? templateId;
+}
+
 export function buildAgentParams(input: {
   payloadTemplate: Record<string, unknown>;
   message: string;
@@ -500,6 +518,7 @@ export function buildAgentParams(input: {
   configuredAgentId: string | null;
   waitTimeoutMs: number;
 }): Record<string, unknown> {
+  const agentId = resolveGatewayAgentId(input.configuredAgentId, input.payloadTemplate.agentId);
   const agentParams: Record<string, unknown> = {
     ...input.payloadTemplate,
     message: input.message,
@@ -509,9 +528,7 @@ export function buildAgentParams(input: {
   delete agentParams.text;
   delete agentParams.paperclip;
 
-  if (input.configuredAgentId && !nonEmpty(agentParams.agentId)) {
-    agentParams.agentId = input.configuredAgentId;
-  }
+  if (agentId) agentParams.agentId = agentId;
 
   if (typeof agentParams.timeout !== "number") {
     agentParams.timeout = input.waitTimeoutMs;
@@ -1065,14 +1082,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
-  const configuredAgentId = nonEmpty(ctx.config.agentId);
-  const sessionKey = resolveSessionKey({
-    strategy: sessionKeyStrategy,
-    configuredSessionKey,
-    agentId: configuredAgentId,
-    runId: ctx.runId,
-    issueId: wakePayload.issueId,
-  });
+  let configuredAgentId: string | null;
+  let sessionKey: string;
+  try {
+    configuredAgentId = resolveGatewayAgentId(ctx.config.agentId, payloadTemplate.agentId);
+    sessionKey = resolveSessionKey({
+      strategy: sessionKeyStrategy,
+      configuredSessionKey,
+      agentId: configuredAgentId,
+      runId: ctx.runId,
+      issueId: wakePayload.issueId,
+    });
+  } catch {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: "openclaw_gateway_routing_invalid",
+      errorMessage: "OpenClaw agentId, payloadTemplate.agentId, and the selected sessionKey must identify the same worker",
+    };
+  }
+
+  if (!configuredAgentId && !sessionKey.startsWith("agent:")) {
+    await ctx.onLog("stderr", "[openclaw-gateway] No worker agentId configured; routing uses the Gateway default agent. Set adapterConfig.agentId explicitly for each delegated worker.\n");
+  }
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
   const message = joinPromptSections([

@@ -76,26 +76,15 @@ describe("buildAgentParams", () => {
     });
   });
 
-  it("preserves an explicit agentId and timeout from the payload template", () => {
-    expect(
-      buildAgentParams({
-        payloadTemplate: {
-          agentId: "template-agent",
-          timeout: 5_000,
-        },
-        message: "wake text",
-        sessionKey: "paperclip",
-        runId: "run-123",
-        configuredAgentId: "configured-agent",
-        waitTimeoutMs: 30_000,
-      }),
-    ).toEqual({
-      agentId: "template-agent",
-      timeout: 5_000,
+  it("rejects a payload template that overrides the configured worker", () => {
+    expect(() => buildAgentParams({
+      payloadTemplate: { agentId: "template-agent", timeout: 5_000 },
       message: "wake text",
       sessionKey: "paperclip",
-      idempotencyKey: "run-123",
-    });
+      runId: "run-123",
+      configuredAgentId: "configured-agent",
+      waitTimeoutMs: 30_000,
+    })).toThrow("payloadTemplate.agentId must match agentId");
   });
 });
 
