@@ -411,3 +411,33 @@ No database was connected, backup created or rehearsal executed. The new procedu
 separates old-code-on-upgraded-schema compatibility from independently restoring
 the pre-upgrade snapshot, and records key custody/filesystem restore as separate
 obligations. ChatGPT retains live access investigation; no homelab files changed.
+
+
+### Concurrent handoff closes the source-revision gap
+
+Before finishing, ChatGPT fetched the exact deployed source object with no branch
+or checkout change and notified Codex via transient
+`DEPLOYED-REVISION-AVAILABLE.md`. A local Git archive of
+`1b4c803816e82b0265c8422e1a804327a7ed8c54` now yields **332** migration entries
+through `0333_normal_wild_pack`. The offline planner compared it with candidate
+615224c's **417** entries and found **85 additions**, from
+`0334_rare_slipstream` through `0418_curved_lady_mastermind`, with an unchanged
+historical prefix. This supersedes the earlier source-object blocker while
+preserving that failed initial lookup in the record.
+
+The new report is `/tmp/paperclip-db-deployed-to-candidate-preparation.json`;
+its deployed manifest is `/tmp/paperclip-deployed-migrations-1b4c8038.json`.
+The planner returned exit 2 / `blocked` solely because the applied journal export
+is still absent. The additions have 21 destructive-keyword,
+37 data-change-keyword and 33
+transaction-boundary review hints (categories overlap; lexical hints are not
+SQL safety review). All 85 SQL changes still require actual migration review and
+an isolated upgrade/recovery rehearsal. Source artifact additions are not a
+measurement of pending migrations in the live DB. Deployed image/source byte
+correlation and applied journal remain separate requirements.
+
+ChatGPT also reports its independent live OpenClaw inventory contains only worker
+`main`; no separate Vision/Codex IDs were present. This is attributed read-only
+inventory evidence, not Codex live access. Earlier example IDs remain examples;
+provisioning/qualifying real additional workers requires its own authorized step.
+No live work, keys, grants, backups, deployments or schedules were changed.

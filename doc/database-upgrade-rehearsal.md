@@ -15,9 +15,13 @@ against a trusted exact source export where available. The planner's
 `sourceRevision` is a caller declaration, not proof of image provenance. Do not
 substitute the qualified df0961a base for the deployed 1b4c8038 build.
 
-The inspected deployed commit `1b4c803816e82b0265c8422e1a804327a7ed8c54` is not
-present in this worktree's Git object database. Its migration artifact export and
-actual applied journal are required before reporting the real migration delta.
+ChatGPT subsequently fetched deployed source commit
+`1b4c803816e82b0265c8422e1a804327a7ed8c54` into this worktree's object database.
+Its Git migration export has 332 entries through `0333_normal_wild_pack`; candidate
+615224c has 417 entries through `0418_curved_lady_mastermind`. The offline exact
+prefix comparison found 85 additions (`0334`–`0418`) and no historical prefix
+rewrite. Verify deployed image bytes against this source export and obtain the
+actual applied journal before calling those additions live pending migrations.
 `packages/db/src/client.ts` discovers the `__drizzle_migrations` table, preferring
 `drizzle`, then `public`. It supports historical column layouts and can fall back
 to timestamps. The offline planner deliberately requires exact hashes and never
