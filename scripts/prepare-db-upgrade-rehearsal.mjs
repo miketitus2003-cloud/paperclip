@@ -14,7 +14,7 @@ function validateManifest(manifest) {
   if (manifest?.format !== 1 || !revisionPattern.test(manifest.sourceRevision) || !Array.isArray(manifest.migrations)) {
     throw new Error("Expected versioned manifest with exact source revision");
   }
-  const tags = new Set(), hashes = new Set();
+  const tags = new Set(), hashes = new Set(), numbers = new Set();
   for (const entry of manifest.migrations) {
     if (!Number.isSafeInteger(entry.idx) || entry.idx < 0 || !tagPattern.test(entry.tag) || !hashPattern.test(entry.sha256)
       || !Number.isSafeInteger(entry.when) || entry.when < 0 || tags.has(entry.tag) || hashes.has(entry.sha256)) {
@@ -24,6 +24,9 @@ function validateManifest(manifest) {
       || !Array.isArray(entry.reviewHints) || entry.reviewHints.some((hint) => !["destructive-keyword", "data-change-keyword", "transaction-boundary-keyword"].includes(hint))) {
       throw new Error("Unexpected migration manifest fields");
     }
+    const number = entry.tag.slice(0, 4);
+    if (numbers.has(number)) throw new Error("Duplicate migration number");
+    numbers.add(number);
     tags.add(entry.tag); hashes.add(entry.sha256);
   }
   if (!manifest.migrations.length) throw new Error("Empty migration manifest is not deployed history");
@@ -63,7 +66,7 @@ export function planRehearsal(baseline, candidate, appliedRows) {
   if (appliedRows === undefined) blockers.push("deployed-journal-export-required");
   else {
     if (!Array.isArray(appliedRows)) throw new Error("Expected journal row array");
-    const hashes = new Set();
+    const hashes = new Set(), ids = new Set();
     for (const row of appliedRows) {
       if (!row || Object.keys(row).some((key) => !["id", "hash", "created_at"].includes(key))
         || !hashPattern.test(row.hash) || !Number.isSafeInteger(row.id) || row.id < 1
@@ -71,6 +74,8 @@ export function planRehearsal(baseline, candidate, appliedRows) {
         throw new Error("Expected only id/hash/created_at journal metadata");
       }
       if (hashes.has(row.hash)) blockers.push("duplicate-journal-hash");
+      if (ids.has(row.id)) blockers.push("duplicate-journal-id");
+      ids.add(row.id);
       hashes.add(row.hash);
     }
     const baselineHashes = new Set(baseline.migrations.map(({ sha256 }) => sha256));

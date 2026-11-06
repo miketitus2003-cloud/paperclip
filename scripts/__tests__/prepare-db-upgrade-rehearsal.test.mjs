@@ -77,3 +77,16 @@ test("preserves historical non-contiguous and tied idx metadata", () => withMani
   assert.deepEqual(manifest.migrations.map((entry) => entry.idx), [178, 178]);
   assert.equal(planRehearsal(manifest, manifest, rows(manifest)).status, "prepared-not-executed");
 }));
+
+test("rejects duplicate migration numbers accepted under distinct tags", () => withManifest((base, dir) => {
+  const journal = JSON.parse(readFileSync(join(dir, "meta/_journal.json"), "utf8"));
+  journal.entries.push({ idx: 2, tag: "0001_duplicate", when: 3 });
+  writeFileSync(join(dir, "0001_duplicate.sql"), "SELECT 123;");
+  writeFileSync(join(dir, "meta/_journal.json"), JSON.stringify(journal));
+  assert.throws(() => createManifest(dir, revision), /migration number/);
+}));
+
+test("blocks impossible duplicate primary IDs in an otherwise complete journal export", () => withManifest((base) => {
+  const applied = rows(base).map((row) => ({ ...row, id: 1 }));
+  assert.ok(planRehearsal(base, base, applied).blockers.includes("duplicate-journal-id"));
+}));
