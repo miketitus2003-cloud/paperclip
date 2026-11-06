@@ -71,7 +71,7 @@ The agent request is built as:
   - `sessionKey` (resolved strategy)
 - optional additions:
   - all `payloadTemplate` fields merged in
-  - `agentId` from config if set and not already in template
+  - `agentId` from config or template; when both are set they must match. A template-only ID also prefixes the session key. Conflicts with a selected `agent:<worker>:` session key fail before connection with `openclaw_gateway_routing_invalid`. Non-string worker IDs fail the same way.
 
 ## Timeouts
 
@@ -79,6 +79,14 @@ The agent request is built as:
 - `waitTimeoutMs` controls `agent.wait.timeoutMs`
 
 If `agent.wait` returns `timeout`, adapter returns `openclaw_gateway_wait_timeout`.
+
+Set `strictReceiptExpectedResponse` to opt into strict task receipts. The adapter
+then requires the `agent` acceptance to include a run ID, calls `agent.wait`
+even if the acceptance status is `ok`, and requires the wait response to carry
+the same run ID and terminal `status: "ok"`. It also requires assistant text
+streamed for that exact run to equal the configured marker byte-for-byte. A
+missing, conflicting, or different value returns a failed receipt. Leave the
+field unset to retain the existing behavior for ordinary callers.
 
 ## Log Format
 
@@ -101,3 +109,33 @@ rather than reaching for a git remote. See
 [`packages/adapters/AUTHORING.md`](../AUTHORING.md#no-remote-git-contract-cross-run-persistence)
 for the full contract and the pinning test at
 [`packages/adapter-utils/src/ssh-fixture.test.ts`](../../adapter-utils/src/ssh-fixture.test.ts).
+
+## Multiple delegated workers
+
+Create a separate Paperclip agent record for each worker. `assigneeAgentId` is
+that record's Paperclip UUID; `adapterConfig.agentId` is the existing OpenClaw
+worker ID, such as `jarvis`, `vision`, or `codex`. Changing the display name or
+`reportsTo` does not create or select an OpenClaw worker. Configure each record
+with its own explicit worker ID and `claimedApiKeyPath`; do not share one claimed
+Paperclip key file among workers. No worker ID and no routed session prefix
+retains Gateway-default routing for compatibility, with a warning in run logs.
+
+Use `sessionKeyStrategy: "issue"` for per-issue continuity, or `"run"` for a fresh
+session each invocation. `"fixed"` reuses one session for that worker and can mix
+concurrent tasks. Issue strategy without an issue ID falls back to `sessionKey`
+(or `paperclip`), so prefer run strategy for concurrent issue-less invocations.
+The adapter does not provision workers or verify their existence via connect.
+
+Assign one child issue per independent unit of work to the corresponding
+Paperclip agent UUID. Keep ordinary company, checkout, approval and budget gates.
+`runtimeConfig.heartbeat.maxConcurrentRuns` limits runs **per Paperclip agent**;
+it need not be increased to run different agents concurrently. Separate agent
+records pointed at the same OpenClaw worker are not isolated workers.
+
+The environment test proves connect only. The local regression
+`src/server/multi-agent-isolation.test.ts` exercises real loopback WebSockets,
+three simultaneously waiting workers, distinct sessions and callback prompts,
+foreign-run events, and an intentionally mismatched terminal receipt. It uses a
+synthetic Gateway and proves neither installed worker availability nor a live
+model's API behavior. See the [dated setup and Git handoff](../../../doc/plans/2026-11-06-jarvis-multi-agent-delegation.md)
+for exact configuration examples, commands, and remaining live gates.

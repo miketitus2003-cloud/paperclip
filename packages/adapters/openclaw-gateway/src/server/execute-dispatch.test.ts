@@ -8,6 +8,7 @@ const websocketState = vi.hoisted(() => ({
   failAgentRequests: 0,
   events: [] as string[],
   messages: [] as string[],
+  params: [] as Record<string, unknown>[],
 }));
 
 vi.mock("ws", async () => {
@@ -38,7 +39,10 @@ vi.mock("ws", async () => {
 
     send(payload: string) {
       const request = JSON.parse(payload) as { id: string; method: string; params?: { message?: string } };
-      if (request.method === "agent") websocketState.messages.push(request.params?.message ?? "");
+      if (request.method === "agent") {
+        websocketState.messages.push(request.params?.message ?? "");
+        websocketState.params.push(request.params as Record<string, unknown>);
+      }
       websocketState.events.push(`send:${request.method}`);
       if (request.method === "agent" && websocketState.failAgentRequests > 0) {
         websocketState.failAgentRequests--;
@@ -109,10 +113,57 @@ describe("openclaw_gateway execute dispatch boundary", () => {
     websocketState.failAgentRequests = 0;
     websocketState.events = [];
     websocketState.messages = [];
+    websocketState.params = [];
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([
+    { agentId: 42 },
+    { payloadTemplate: { agentId: {} } },
+    { agentId: "vision", payloadTemplate: { agentId: "jarvis" } },
+    { agentId: "vision", sessionKeyStrategy: "fixed", sessionKey: "agent:main:paperclip" },
+    { payloadTemplate: { agentId: "vision" }, sessionKeyStrategy: "fixed", sessionKey: "agent:jarvis:paperclip" },
+  ])("rejects conflicting worker routing before connecting: %j", async (config) => {
+    const ctx = createContext();
+    Object.assign(ctx.config, config);
+    const result = await execute(ctx);
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "openclaw_gateway_routing_invalid" });
+    expect(websocketState.connectionAttempts).toBe(0);
+    expect(websocketState.params).toHaveLength(0);
+  });
+
+  it("isolates concurrent workers, including a template-only worker ID", async () => {
+    const contexts = ["jarvis", "vision", "codex"].map((worker, index) => {
+      const ctx = createContext();
+      ctx.runId = `run-${worker}`;
+      ctx.agent.id = `paperclip-${worker}`;
+      ctx.context = { issueId: `issue-${worker}`, taskId: `issue-${worker}` };
+      Object.assign(ctx.config, index === 1 ? { payloadTemplate: { agentId: worker } } : { agentId: worker });
+      return ctx;
+    });
+    const results = await Promise.all(contexts.map(execute));
+    expect(results.map((result) => result.exitCode)).toEqual([0, 0, 0]);
+    expect(websocketState.params).toHaveLength(3);
+    for (const worker of ["jarvis", "vision", "codex"]) {
+      expect(websocketState.params).toContainEqual(expect.objectContaining({
+        agentId: worker,
+        sessionKey: `agent:${worker}:paperclip:issue:issue-${worker}`,
+        idempotencyKey: `run-${worker}`,
+      }));
+      const request = websocketState.params.find((params) => params.agentId === worker)!;
+      expect(request.message).toContain(`paperclip-${worker}`);
+      expect(request.message).toContain(`run-${worker}`);
+      expect(request.message).not.toContain(`paperclip-${worker === "jarvis" ? "vision" : "jarvis"}`);
+    }
+  });
+
+  it("makes legacy Gateway-default routing visible", async () => {
+    const onLog = vi.fn(async () => {});
+    expect(await execute(createContext({ onLog }))).toMatchObject({ exitCode: 0 });
+    expect(onLog).toHaveBeenCalledWith("stderr", expect.stringContaining("routing uses the Gateway default agent"));
   });
 
   it.each([false, true])("sends conversation policy without the issue-completion workflow (resumed=%s)", async (resumed) => {

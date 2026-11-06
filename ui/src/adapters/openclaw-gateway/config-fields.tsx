@@ -162,6 +162,27 @@ export function OpenClawGatewayConfigFields({
         />
       </Field>
 
+      <Field
+        label="Strict Gateway receipt marker"
+        hint="Optional. Require a matching Gateway run ID, terminal success, and this exact assistant response."
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? values!.strictReceiptExpectedResponse ?? ""
+              : eff("adapterConfig", "strictReceiptExpectedResponse", String(config.strictReceiptExpectedResponse ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ strictReceiptExpectedResponse: v || undefined })
+              : mark("adapterConfig", "strictReceiptExpectedResponse", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="JARVIS_PILOT_OK"
+        />
+      </Field>
+
       <PayloadTemplateJsonField
         isCreate={isCreate}
         values={values}
