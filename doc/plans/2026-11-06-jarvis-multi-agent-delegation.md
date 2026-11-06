@@ -298,3 +298,52 @@ new image. Base loader/tool presence is guarded but not yet observed in a patch
 build. No existing deployment hold is lifted; live operator sign-in, actual
 worker inventory/identity, derived-image qualification and separate rollout
 review remain outstanding.
+
+## ChatGPT-observed derived image qualification — 2026-11-06
+
+ChatGPT completed the local build and exact-ID qualification; the following are
+its reported observations, not additional Codex test runs. Source commit
+`615224c525ab4f1ace0c19437b5640bb962b5668` was published by ChatGPT in draft PR7.
+That publication is separate from Codex's earlier no-push statements, which
+remain accurate for Codex's actions.
+
+The review-only derived image is
+`sha256:0f7b8f2a9602f3d438d85d516c9694a644d14423b56985432a70457156543d4e`,
+tagged `paperclip-jarvis-derived:615224c-review`. It uses the prepared recipe at
+`/tmp/paperclip-delegation-derived-615224c`, the qualified base image
+`sha256:2b2a8e43d46e9d2f5418374c64d6756339c527ac0bd31ead00cc5a3d8a0e9a02`,
+and patch source `615224c`. It deliberately inherits the df0961a base build
+stamp and is **not a clean full source rebuild** of the patch commit.
+
+ChatGPT's build result at
+`/home/storm25/Projects/paperclip-delegation-image-review/build-result.json`
+records a 10.0-second build with network disabled and no pull, minimum
+user-available space of 17,553,133,568 bytes, a regenerated 2,637-input runtime
+bundle, and the routing-invalid marker found in that new bundle.
+
+Its exact-ID qualification report at
+`/home/storm25/Projects/paperclip-delegation-image-review/evidence/image-qualification.json`
+records production startup health HTTP 200/status ok, UI HTTP 200, JavaScript
+HTTP 200, passing overlay/runtime manifest byte checks, and source receipt bytes
+matching the overlay. All **65/65 adapter tests passed, with zero failures or
+skips**. Qualification used network none, no host mounts and no published ports;
+container cleanup was PASS. These are synthetic adapter tests and isolated
+production startup evidence, not live worker acceptance. This new derived-image
+qualification is distinct from the historical base image's 39-case qualification.
+The earlier source compilation/API verification remains recorded above; no
+additional investigation or tests were run by Codex for this documentation update.
+
+ChatGPT also reported read-only live CT404 metadata: build
+`1b4c803816e82b0265c8422e1a804327a7ed8c54`, version
+`v2026.1005.0-330-g1b4c80381`, embedded PostgreSQL 18, and `local_encrypted`
+provider. Initial config-only/root probes misleadingly reported a missing key or
+`PROCESS_NOT_FOUND` because of root HOME/UID context. The actual metadata-only
+key-file probe, executed as application UID:GID `1000:1000`, reported the key
+file present, mode `0600`, owner `1000:1000`, readable yes, exit 0. No key bytes
+were read or exposed. This establishes file presence/readability only, not
+backup custody or restore readiness.
+
+No live mutation, model/task execution, deployment or authentication change
+occurred in this reported work. The image remains review-only. Live rollout,
+operator Board sign-in, actual agent/worker identity verification and live
+acceptance remain pending; existing deployment holds are unchanged.
