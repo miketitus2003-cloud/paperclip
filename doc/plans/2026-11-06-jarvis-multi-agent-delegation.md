@@ -347,3 +347,67 @@ No live mutation, model/task execution, deployment or authentication change
 occurred in this reported work. The image remains review-only. Live rollout,
 operator Board sign-in, actual agent/worker identity verification and live
 acceptance remain pending; existing deployment holds are unchanged.
+
+## Research-lab execution plan and database rehearsal preparation — 2026-11-06
+
+Build toward the AI research lab in gated increments:
+
+1. Establish a dependable IT/network/Linux/security foundation: known hosts and
+   service owners, supported authenticated access, least privilege, reachable
+   worker callback paths, monitored capacity, and recoverable encrypted data.
+   Keep sensitive material in the established secret system and record only
+   non-secret identity, health and custody evidence.
+2. Qualify multiple real workers as separate company-scoped agent records,
+   each mapped to its actual runtime and identity. Verify independent assignment,
+   checkout, callbacks and terminal evidence before claiming lab readiness.
+3. Execute bounded task loops with explicit scope, cost/time limits, checks,
+   durable work products and a stopping condition. A successful tool response is
+   not completion evidence; preserve failures and identify the next owner/action.
+4. Express parallel research and implementation as task graphs: one assignee per
+   child issue, explicit prerequisites, isolated editing workspaces, and a parent
+   that integrates reviewed results. Human decisions and blocked dependencies
+   pause the relevant graph rather than creating unbounded polling loops.
+5. Require final human approval for impactful release after exact-artifact
+   verification, database upgrade/rollback rehearsal and operational review.
+   Source commits and local rehearsal preparation do not authorize deployment.
+
+ChatGPT owns the concurrent live authenticated-access investigation. Codex's next
+slice is local-only database rehearsal preparation: compare deployed-to-candidate
+migration artifacts, inspect the existing backup/restore harness, and add narrowly
+tested offline tooling where needed. No production data, backup creation, live
+models, grants, schedules or deployment are part of this slice.
+
+### Offline database preparation outcome
+
+Added `scripts/prepare-db-upgrade-rehearsal.mjs`, focused Node tests and bounded
+read-only journal SQL templates; the actionable procedure is
+`doc/database-upgrade-rehearsal.md`. The planner accepts local manifests and
+metadata-only journal exports, computes exact SQL SHA256s, rejects rewritten or
+removed history, unknown/duplicate/incomplete applied hashes, unsafe file tags
+and DB URL arguments, and refuses evidence overwrites. Its best successful state
+is `prepared-not-executed`; it cannot connect, migrate, back up or restore.
+
+Local inspection found **417 executable journal entries** ending in
+`0418_curved_lady_mastermind`. The historical indices contain gaps/ties, so the
+initial planner's contiguous-index assumption failed against real artifacts;
+it was corrected to preserve historical metadata, with regression coverage.
+A Git export of df0961a and the candidate 615224c have identical migration
+history (**zero additions**). That comparison concerns the qualified base and
+patch, **not the deployed build**. `git cat-file -t` for deployed commit
+`1b4c803816e82b0265c8422e1a804327a7ed8c54` failed because the object is absent.
+Actual deployed artifact SQL/journal and read-only applied journal export are
+still required; no pending-migration count for production is claimed.
+
+Verification: `node scripts/__tests__/prepare-db-upgrade-rehearsal.test.mjs`
+passed **10/10**, including rewritten history, metadata gaps/ties, unknown and
+partial hashes, secret-bearing extra fields, safe CLI rejection and no overwrite.
+The real-artifact manifest smoke passed with 417 entries; the comparison report
+at `/tmp/paperclip-db-offline-preparation.json` correctly reports `blocked` with
+`deployed-journal-export-required` (planner exit 2). Input manifests are
+`/tmp/paperclip-base-migrations-df0961a.json` and
+`/tmp/paperclip-candidate-migrations-615224c.json`; these are offline preparation
+artifacts, not live journal evidence. No adapter/image suites were repeated.
+No database was connected, backup created or rehearsal executed. The new procedure
+separates old-code-on-upgraded-schema compatibility from independently restoring
+the pre-upgrade snapshot, and records key custody/filesystem restore as separate
+obligations. ChatGPT retains live access investigation; no homelab files changed.
