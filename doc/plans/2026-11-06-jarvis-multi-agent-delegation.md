@@ -220,3 +220,81 @@ be used with `strictReceiptExpectedResponse` for a qualification task; do not
 leave a fixed marker on ordinary tasks whose answers should vary. No live task,
 key provisioning, pairing, scope grant, scheduling or deployment is authorized
 by this source handoff. Existing CT404/VM200 deployment holds remain.
+
+
+## Additive rollout preparation — 2026-11-06
+
+PR7 now contains delegation source commit
+`615224c525ab4f1ace0c19437b5640bb962b5668`, published by ChatGPT. This follow-up
+changes documentation only; it neither reruns passing checks nor publishes Git.
+
+**Legitimate operator authentication.** `doc/CLI.md` documents browser-approved
+Board authentication. `ui/src/api/client.ts` uses `credentials: "include"`, so
+an already signed-in operator can use that instance's existing browser UI without
+exporting cookies. For self-hosted authenticated instances the operator signs in
+at `/auth` using their existing account; Cloud-managed instances use their Cloud
+sign-in redirect (`doc/DEPLOYMENT-MODES.md`, `ui/src/pages/Auth.tsx`). A 403 from
+an unauthenticated command does not establish missing membership or missing keys.
+No authenticated browser or CLI surface was established by this source-only pass.
+The required interaction is the operator opening the correct instance in their
+browser and signing in, not an invented infrastructure permission gate.
+
+CLI `resolveCommandContext` (`cli/src/commands/client/common.ts`) reuses its
+stored Board credential for the exact normalized API base automatically. Explicit
+or environment-provided agent keys take precedence; do not substitute an agent
+key for Board access or print those environment values. With the existing local
+CLI, the supported read is:
+
+```sh
+node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts auth whoami --api-base <instance-url>
+```
+
+This command contacts the instance and can trigger interactive auth recovery in a
+TTY; it was not run here. If no valid stored credential exists, an operator may
+separately choose `auth login --api-base <instance-url> --no-browser` through the
+same direct CLI entrypoint, open the printed approval link in their browser,
+sign in and review/approve the requested Board access. `loginBoardCli` creates a
+ten-minute challenge and stores a credential only after approval and identity
+verification (`cli/src/client/board-auth.ts`). This is credential issuance, not
+read-only diagnostics, and was not initiated. It does not require extracting
+browser cookies or `--instance-admin`. Do not use bootstrap-ceo on an existing
+instance as a diagnostic shortcut. `agent list --company-id <company-uuid>` can
+then use that supported CLI credential; report identity/configuration categories
+rather than dumping agent config or auth stores. `doctor` is not a pure read-only
+auth probe: it reads local configuration/secrets, probes services and can create
+storage directories even without `--repair` (`cli/src/commands/doctor.ts`,
+`cli/src/checks/storage-check.ts`), so it was not run under this scope.
+
+**Derived image finding.** Production starts `node server/dist-runtime/index.mjs`
+(`Dockerfile`); `server/scripts/bundle-runtime.mjs` bundles `@paperclipai/*`,
+including the static OpenClaw imports in `server/src/adapters/registry.ts`.
+Workspace package exports point at adapter `src/*.ts`; `publishConfig.exports`
+points published packages at `dist`, but is not the workspace runtime export map.
+Therefore copying `/tmp/paperclip-delegation-build` over adapter dist alone is
+ineffective for the existing production bundle. A sound candidate must regenerate
+the bundle as well. Base qualification evidence in the existing local artifact
+package records a production startup and the immutable local image ID
+`sha256:2b2a8e43d46e9d2f5418374c64d6756339c527ac0bd31ead00cc5a3d8a0e9a02`;
+this is an image ID, not a registry manifest digest.
+
+Prepared `/tmp/paperclip-delegation-derived-615224c/` (under 1 MiB): a guarded
+Dockerfile, committed adapter source overlay, prior verified tsc output,
+`BASE-SHA256SUMS`, `OVERLAY-SHA256SUMS`, `provenance.json`, build wrapper and
+qualification instructions. All overlay checksum entries passed locally. The
+recipe checks base source/package/bundler bytes and stamp, copies only the adapter
+overlay, then uses the base's existing esbuild and bundler to regenerate runtime
+chunks. Guards stop unsupported base layouts instead of pretending a dist-only
+patch works. Patch labels retain both commits and the exact base image ID; the
+base build stamp remains df0961a. This is explicitly a derived patch candidate,
+never a clean full rebuild of 615224c. The wrapper checks local base ID/platform/CMD,
+uses no network or pulls, and monitors user-available disk with an 8 GiB stop
+threshold and 180-second limit. Available space remained 17 GiB during preparation.
+
+No Docker build was performed. ChatGPT may run the prepared wrapper locally and
+must qualify the resulting immutable image ID with exact overlay/runtime byte
+checks and isolated production startup plus synthetic adapter acceptance. The old
+base-pinned qualification harness/report cannot qualify or be relabeled as this
+new image. Base loader/tool presence is guarded but not yet observed in a patch
+build. No existing deployment hold is lifted; live operator sign-in, actual
+worker inventory/identity, derived-image qualification and separate rollout
+review remain outstanding.
